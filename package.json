@@ -1,0 +1,45 @@
+{
+  "name": "jungle-gaming-challenge",
+  "version": "1.0.0",
+  "description": "Distributed Wagering Processor",
+  "scripts": {
+    "start:dev": "nest start --watch",
+    "build": "nest build",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "test:concurrency": "bun test test/concurrency",
+    "migration:create": "mikro-orm migration:create --config src/infrastructure/database/mikro-orm.config.ts",
+    "migration:up": "mikro-orm migration:up",
+    "migration:down": "mikro-orm migration:down"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.500.0",
+    "@mikro-orm/core": "^7.2.5",
+    "@mikro-orm/migrations": "^7.2.5",
+    "@mikro-orm/postgresql": "^7.2.5",
+    "@nestjs/common": "^10.3.0",
+    "@nestjs/core": "^10.3.0",
+    "@nestjs/platform-express": "^10.3.0",
+    "@nestjs/schedule": "^4.0.0",
+    "big.js": "^6.2.1",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@mikro-orm/cli": "^7.2.5",
+    "@nestjs/cli": "^10.3.0",
+    "@nestjs/testing": "^10.3.0",
+    "@oxc-node/core": "^1.0.1",
+    "@swc-node/register": "^1.12.1",
+    "@swc/core": "^1.16.20",
+    "@types/big.js": "^6.2.2",
+    "@types/node": "^20.12.0",
+    "bun-types": "^1.1.0",
+    "ts-node": "^10.9.1"
+  },
+  "mikro-orm": {
+    "useTsNode": true,
+    "configPaths": [
+      "./src/infrastructure/database/mikro-orm.config.ts"
+    ]
+  }
+}
