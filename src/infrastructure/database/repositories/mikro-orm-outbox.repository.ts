@@ -1,4 +1,4 @@
-import { EntityManager } from "@mikro-orm/postgresql";
+import { EntityManager, LockMode } from "@mikro-orm/postgresql";
 import { OutboxMessage } from "../../../domain/entities/outbox-message";
 import { OutboxRepositoryPort } from "../../../application/ports/outbox.repository";
 import { OutboxMessageSchema, OutboxMessageEntity } from "../entities/outbox-message.schema";
@@ -37,13 +37,19 @@ export class MikroOrmOutboxRepository implements OutboxRepositoryPort {
     const em = this.getEm(tx);
     const now = new Date();
 
+    // Usa FOR UPDATE SKIP LOCKED quando executado dentro de uma transação (ex: OutboxPublisher),
+    // permitindo múltiplos publishers concorrentes sem duplicação de envio nem bloqueio mútuo.
     const entities = await em.find(
       OutboxMessageSchema,
       {
         publishedAt: null,
         $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: now } }],
       },
-      { limit, orderBy: { occurredAt: "ASC" } },
+      {
+        limit,
+        orderBy: { occurredAt: "ASC" },
+        ...(tx ? { lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE } : {}),
+      },
     );
 
     return entities.map((e) =>

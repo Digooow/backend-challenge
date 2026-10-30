@@ -27,4 +27,15 @@ export const WalletLedgerEntrySchema = new EntitySchema<WalletLedgerEntryEntity>
     balanceAfter: { type: "decimal", precision: 19, scale: 2 },
     createdAt: { type: "datetime" },
   },
+  uniques: [
+    { name: "unique_wallet_transaction_ledger", properties: ["walletId", "transactionId"] },
+  ],
+  checks: [
+    { name: "check_positive_ledger_amount", expression: "amount > 0" },
+    {
+      name: "check_ledger_balance_arithmetic",
+      expression:
+        "(direction = 'CREDIT' AND balance_before + amount = balance_after) OR (direction = 'DEBIT' AND balance_before - amount = balance_after)",
+    },
+  ],
 });

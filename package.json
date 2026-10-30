@@ -8,8 +8,9 @@
     "build": "nest build",
     "test": "bun test",
     "test:unit": "bun test test/unit",
-    "test:integration": "mocha -r ./test/setup/register-ts.cjs \"test/integration/**/*.spec.ts\"",
+    "test:integration": "bun test test/integration",
     "test:concurrency": "bun test test/concurrency",
+    "test:load": "bun run test/load/load-test.ts",
     "migration:create": "mikro-orm migration:create --config src/infrastructure/database/mikro-orm.config.ts",
     "migration:up": "mikro-orm migration:up",
     "migration:down": "mikro-orm migration:down"

@@ -18,6 +18,7 @@ import { MikroOrmOutboxRepository } from '../database/repositories/mikro-orm-out
 import { MikroOrmUnitOfWork } from '../database/unit-of-work';
 
 // Use Cases
+import { CreateWalletUseCase } from '../../application/use-cases/create-wallet.use-case';
 import { ProcessWagerTransactionUseCase } from '../../application/use-cases/process-wager-transaction.use-case';
 import { ReconcileWalletUseCase } from '../../application/use-cases/reconcile-wallet.use-case';
 
@@ -29,15 +30,17 @@ import { WagerSqsConsumer } from '../messaging/sqs/wager-sqs.consumer';
 
 // Observability
 import { JsonLoggerService } from '../observability/json-logger.service';
+import { MetricsService } from '../observability/metrics.service';
 
 @Module({
   imports: [
-    MikroOrmModule.forRoot(config as any), // Uses mikro-orm.config.ts automatically
-    ScheduleModule.forRoot(), // Enables Cron Jobs
+    MikroOrmModule.forRoot(config as any),
+    ScheduleModule.forRoot(),
   ],
   controllers: [HealthController, WalletController, WagerController],
   providers: [
-    JsonLoggerService, // Registo do logger estruturado em JSON
+    JsonLoggerService,
+    MetricsService,
     { provide: 'WalletRepositoryPort', useFactory: (em) => new MikroOrmWalletRepository(em), inject: [EntityManager] },
     { provide: 'WagerTransactionRepositoryPort', useFactory: (em) => new MikroOrmWagerTransactionRepository(em), inject: [EntityManager] },
     { provide: 'OutboxRepositoryPort', useFactory: (em) => new MikroOrmOutboxRepository(em), inject: [EntityManager] },
@@ -51,6 +54,12 @@ import { JsonLoggerService } from '../observability/json-logger.service';
     { provide: 'InboxRepositoryPort', useFactory: (em) => new MikroOrmInboxRepository(em), inject: [EntityManager] },
 
     // Domain Use Cases
+    {
+      provide: CreateWalletUseCase,
+      useFactory: (walletRepo, uow, wagerTxRepo) =>
+        new CreateWalletUseCase(walletRepo, uow, wagerTxRepo),
+      inject: ['WalletRepositoryPort', 'UnitOfWorkPort', 'WagerTransactionRepositoryPort'],
+    },
     {
       provide: ProcessWagerTransactionUseCase,
       useFactory: (walletRepo, wagerTxRepo, outboxRepo, uow) =>
@@ -77,6 +86,6 @@ import { JsonLoggerService } from '../observability/json-logger.service';
       inject: [ProcessWagerTransactionUseCase, 'InboxRepositoryPort', 'UnitOfWorkPort'],
     }
   ],
-  exports: [JsonLoggerService],
+  exports: [JsonLoggerService, MetricsService],
 })
 export class AppModule { }

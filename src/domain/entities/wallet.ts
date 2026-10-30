@@ -1,6 +1,7 @@
 import { DomainException } from "../exceptions/domain.exception";
 import { Money } from "../value-objects/money";
 import { LedgerDirection, WalletLedgerEntry } from "./wallet-ledger-entry";
+import { WagerTransaction } from "./wager-transaction";
 
 export interface OpenWalletProps {
   id: string;
@@ -34,7 +35,11 @@ export class Wallet {
     private _updatedAt: Date,
   ) {}
 
-  static open(props: OpenWalletProps): { wallet: Wallet; openingLedgerEntry?: WalletLedgerEntry } {
+  static open(props: OpenWalletProps): {
+    wallet: Wallet;
+    openingLedgerEntry?: WalletLedgerEntry;
+    openingTransaction?: WagerTransaction;
+  } {
     const now = props.createdAt ?? new Date();
     const currency = props.initialBalance.currency;
 
@@ -53,14 +58,25 @@ export class Wallet {
     );
 
     let openingLedgerEntry: WalletLedgerEntry | undefined;
+    let openingTransaction: WagerTransaction | undefined;
 
-    // Se o saldo inicial for maior que zero, gera a transação de abertura
+    // Se o saldo inicial for maior que zero, gera a transação interna OPENING e lançamento no ledger
     if (props.initialBalance.isPositive()) {
       const zeroBalance = Money.zero(currency);
+      const openingTxId = crypto.randomUUID();
+
+      openingTransaction = WagerTransaction.createOpening({
+        id: openingTxId,
+        walletId: wallet.id,
+        playerId: wallet.playerId,
+        money: props.initialBalance,
+        createdAt: now,
+      });
+
       openingLedgerEntry = WalletLedgerEntry.create({
         id: crypto.randomUUID(),
         walletId: wallet.id,
-        transactionId: crypto.randomUUID(),
+        transactionId: openingTxId,
         direction: LedgerDirection.Credit,
         money: props.initialBalance,
         balanceBefore: zeroBalance,
@@ -69,7 +85,7 @@ export class Wallet {
       });
     }
 
-    return { wallet, openingLedgerEntry };
+    return { wallet, openingLedgerEntry, openingTransaction };
   }
 
   static rehydrate(state: WalletState): Wallet {

@@ -1,6 +1,5 @@
 import { describe, it, beforeAll, afterAll, expect } from "bun:test";
-import { MikroORM } from "@mikro-orm/core";
-import { EntityManager } from "@mikro-orm/postgresql";
+import { MikroORM, EntityManager } from "@mikro-orm/postgresql";
 
 // Importando o setup correto
 import { setupTestDb, teardownTestDb } from "../setup/setup-test-db";
@@ -158,5 +157,36 @@ describe("Wager processing (integration)", () => {
 
     expect(result.status).toBe(WagerTransactionStatus.Rejected as any);
     expect(result.failureCode).toBe(FailureCode.InsufficientBalance as any);
+  });
+
+  it("deve bloquear UPDATE e DELETE em wallet_ledger_entries via trigger Append-Only no PostgreSQL (Seção 5 Regra 5 e 9)", async () => {
+    const playerId = `player-immutable-${crypto.randomUUID()}`;
+    const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
+      id: crypto.randomUUID(),
+      playerId,
+      initialBalance: Money.from({ amount: "100.00", currency: "BRL" }),
+    });
+
+    const setupEm = (orm.em.fork() as unknown) as EntityManager;
+    const setupRepo = new MikroOrmWalletRepository(setupEm);
+    const setupTxRepo = new MikroOrmWagerTransactionRepository(setupEm);
+    await setupRepo.save(wallet);
+    if (openingTransaction) await setupTxRepo.save(openingTransaction);
+    if (openingLedgerEntry) await setupRepo.saveLedgerEntry(openingLedgerEntry);
+    await setupEm.flush();
+
+    const connection = orm.em.getConnection();
+
+    await expect(
+      connection.execute(
+        `UPDATE "wallet_ledger_entries" SET amount = 999.00 WHERE id = '${openingLedgerEntry!.id}'`,
+      ),
+    ).rejects.toThrow(/append-only/);
+
+    await expect(
+      connection.execute(
+        `DELETE FROM "wallet_ledger_entries" WHERE id = '${openingLedgerEntry!.id}'`,
+      ),
+    ).rejects.toThrow(/append-only/);
   });
 });

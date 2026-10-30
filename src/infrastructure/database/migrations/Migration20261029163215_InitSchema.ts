@@ -29,10 +29,30 @@ export class Migration20261029163215_InitSchema extends Migration {
     this.addSql(`create table "wallet_ledger_entries" ("id" uuid not null, "wallet_id" uuid not null, "transaction_id" uuid not null, "direction" text not null, "amount" numeric(19,2) not null, "currency" varchar(3) not null, "balance_before" numeric(19,2) not null, "balance_after" numeric(19,2) not null, "created_at" timestamptz not null, primary key ("id"));`);
     this.addSql(`create index "wallet_ledger_entries_wallet_id_index" on "wallet_ledger_entries" ("wallet_id");`);
     this.addSql(`create index "wallet_ledger_entries_transaction_id_index" on "wallet_ledger_entries" ("transaction_id");`);
+    this.addSql(`alter table "wallet_ledger_entries" add constraint "unique_wallet_transaction_ledger" unique ("wallet_id", "transaction_id");`);
     this.addSql(`alter table "wallet_ledger_entries" add constraint "wallet_ledger_entries_direction_check" check ("direction" in ('DEBIT', 'CREDIT'));`);
+    this.addSql(`alter table "wallet_ledger_entries" add constraint "check_positive_ledger_amount" check (amount > 0);`);
+    this.addSql(`alter table "wallet_ledger_entries" add constraint "check_ledger_balance_arithmetic" check ((direction = 'CREDIT' and balance_before + amount = balance_after) or (direction = 'DEBIT' and balance_before - amount = balance_after));`);
+
+    // Trigger de imutabilidade física (Append-Only) para wallet_ledger_entries (Seção 5 Regra 5 e 9)
+    this.addSql(`
+      create or replace function forbid_ledger_mutation()
+      returns trigger as $$
+      begin
+        raise exception 'wallet_ledger_entries is append-only: % is forbidden', tg_op;
+      end;
+      $$ language plpgsql;
+    `);
+    this.addSql(`
+      create trigger trigger_forbid_ledger_mutation
+      before update or delete on "wallet_ledger_entries"
+      for each row execute function forbid_ledger_mutation();
+    `);
   }
 
- async down(): Promise<void> {
+  async down(): Promise<void> {
+    this.addSql(`drop trigger if exists "trigger_forbid_ledger_mutation" on "wallet_ledger_entries";`);
+    this.addSql(`drop function if exists forbid_ledger_mutation();`);
     this.addSql(`drop table if exists "outbox_messages" cascade;`);
     this.addSql(`drop table if exists "inbox_messages" cascade;`);
     this.addSql(`drop table if exists "wallet_ledger_entries" cascade;`);

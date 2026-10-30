@@ -2,6 +2,7 @@ import { DomainException } from "../../domain/exceptions/domain.exception";
 import { Wallet } from "../../domain/entities/wallet";
 import { Money } from "../../domain/value-objects/money";
 import { WalletRepositoryPort } from "../ports/wallet.repository";
+import { WagerTransactionRepositoryPort } from "../ports/wager-transaction.repository";
 import { UnitOfWorkPort } from "../ports/unit-of-work.port";
 import { CreateWalletInputDto, CreateWalletOutputDto } from "../dtos/create-wallet.dto";
 
@@ -9,6 +10,7 @@ export class CreateWalletUseCase {
   constructor(
     private readonly walletRepo: WalletRepositoryPort,
     private readonly uow: UnitOfWorkPort,
+    private readonly wagerTxRepo?: WagerTransactionRepositoryPort,
   ) {}
 
   async execute(input: CreateWalletInputDto): Promise<CreateWalletOutputDto> {
@@ -27,13 +29,17 @@ export class CreateWalletUseCase {
         );
       }
 
-      const { wallet, openingLedgerEntry } = Wallet.open({
+      const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
         id: crypto.randomUUID(),
         playerId: input.playerId,
         initialBalance: initialMoney,
       });
 
       await this.walletRepo.save(wallet, tx);
+
+      if (openingTransaction && this.wagerTxRepo) {
+        await this.wagerTxRepo.save(openingTransaction, tx);
+      }
 
       if (openingLedgerEntry) {
         await this.walletRepo.saveLedgerEntry(openingLedgerEntry, tx);

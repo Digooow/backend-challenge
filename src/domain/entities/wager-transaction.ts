@@ -3,6 +3,7 @@ import { InvalidTransactionStateException } from "../exceptions/invalid-transact
 import { WagerTransactionKind } from "../enums/wager-transaction-kind";
 import { WagerTransactionStatus } from "../enums/wager-transaction-status";
 import { FailureCode } from "../enums/failure-code";
+import { LedgerDirection } from "../enums/ledger-direction";
 import { Money } from "../value-objects/money";
 
 export interface CreateWagerTransactionProps {
@@ -89,6 +90,36 @@ export class WagerTransaction {
     }
 
     return tx;
+  }
+
+  /** Cria transação interna de abertura (OPENING) já no estado PROCESSED. */
+  static createOpening(props: {
+    id: string;
+    walletId: string;
+    playerId: string;
+    money: Money;
+    createdAt?: Date;
+  }): WagerTransaction {
+    const now = props.createdAt ?? new Date();
+    return new WagerTransaction(
+      props.id,
+      "internal",
+      `opening:${props.walletId}`,
+      `internal:opening:${props.walletId}`,
+      "opening",
+      props.walletId,
+      props.playerId,
+      `opening:${props.walletId}`,
+      "wallet-opening",
+      WagerTransactionKind.Opening,
+      props.money,
+      undefined,
+      now,
+      WagerTransactionStatus.Processed,
+      undefined,
+      undefined,
+      now,
+    );
   }
 
   static rehydrate(state: WagerTransactionState): WagerTransaction {
@@ -178,6 +209,26 @@ export class WagerTransaction {
 
   matchesPayload(payloadHash: string): boolean {
     return this.payloadHash === payloadHash;
+  }
+
+  ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
+    switch (this.kind) {
+      case WagerTransactionKind.Opening:
+      case WagerTransactionKind.Win:
+      case WagerTransactionKind.Refund:
+        return LedgerDirection.Credit;
+      case WagerTransactionKind.Bet:
+        return LedgerDirection.Debit;
+      case WagerTransactionKind.Rollback:
+        if (!reference) {
+          throw new DomainException("ROLLBACK exige a transação de referência para determinar a direção no ledger.");
+        }
+        return reference.kind === WagerTransactionKind.Bet
+          ? LedgerDirection.Credit
+          : LedgerDirection.Debit;
+      default:
+        throw new DomainException(`A operação ${this.kind} não gera lançamento no ledger.`);
+    }
   }
 
   private assertNotTerminal(): void {

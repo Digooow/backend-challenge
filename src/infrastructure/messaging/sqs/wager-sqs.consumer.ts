@@ -1,9 +1,17 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from "@nestjs/common";
-import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand } from "@aws-sdk/client-sqs";
+import {
+  SQSClient,
+  ReceiveMessageCommand,
+  DeleteMessageCommand,
+  SendMessageCommand,
+  ChangeMessageVisibilityCommand,
+} from "@aws-sdk/client-sqs";
+import { createHash } from "node:crypto";
 import { ProcessWagerTransactionUseCase } from "../../../application/use-cases/process-wager-transaction.use-case";
 import { InboxRepositoryPort } from "../../../application/ports/inbox.repository";
 import { UnitOfWorkPort } from "../../../application/ports/unit-of-work.port";
-import { InboxMessage } from "../../../domain/entities/inbox-message"; // Ajuste o caminho se necessário
+import { InboxMessage } from "../../../domain/entities/inbox-message";
+import { DomainException } from "../../../domain/exceptions/domain.exception";
 import type { ProcessWagerInputDto } from "../../../application/dtos/process-wager.dto";
 
 @Injectable()
@@ -11,18 +19,26 @@ export class WagerSqsConsumer implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(WagerSqsConsumer.name);
   private readonly sqsClient: SQSClient;
   private readonly queueUrl: string;
+  private readonly dlqUrl: string;
   private readonly consumerName = "wager-transactions-consumer";
+  private readonly maxReceiveCount = 3;
   private isRunning = false;
+  private inFlightMessages = new Set<Promise<void>>();
 
   constructor(
     private readonly useCase: ProcessWagerTransactionUseCase,
     private readonly inboxRepository: InboxRepositoryPort,
     private readonly uow: UnitOfWorkPort
   ) {
-    this.queueUrl = process.env.SQS_WAGER_QUEUE_URL ?? "http://localhost:4566/000000000000/wager-transactions.fifo";
+    const endpoint = process.env.SQS_ENDPOINT ?? "http://localhost:4566";
+    this.queueUrl =
+      process.env.SQS_WAGER_QUEUE_URL ?? `${endpoint}/000000000000/wager-transactions.fifo`;
+    this.dlqUrl =
+      process.env.SQS_WAGER_DLQ_URL ?? `${endpoint}/000000000000/wager-transactions-dlq.fifo`;
+
     this.sqsClient = new SQSClient({
       region: process.env.AWS_REGION ?? "us-east-1",
-      endpoint: process.env.SQS_ENDPOINT ?? "http://localhost:4566",
+      endpoint,
       credentials: {
         accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "test",
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "test",
@@ -33,14 +49,19 @@ export class WagerSqsConsumer implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     this.isRunning = true;
     this.logger.log(`A iniciar o consumidor SQS em ${this.queueUrl}`);
-    // Inicia o loop de polling em background
     this.pollMessages();
   }
 
-  onModuleDestroy() {
-    this.logger.log("A encerrar o consumidor SQS graciosamente...");
+  async onModuleDestroy() {
+    this.logger.log("SIGTERM/Shutdown recebido: aguardando conclusão das mensagens SQS em andamento...");
     this.isRunning = false;
+
+    if (this.inFlightMessages.size > 0) {
+      await Promise.allSettled(Array.from(this.inFlightMessages));
+    }
+
     this.sqsClient.destroy();
+    this.logger.log("Consumidor SQS encerrado com segurança.");
   }
 
   private async pollMessages() {
@@ -49,7 +70,7 @@ export class WagerSqsConsumer implements OnModuleInit, OnModuleDestroy {
         const command = new ReceiveMessageCommand({
           QueueUrl: this.queueUrl,
           MaxNumberOfMessages: 10,
-          WaitTimeSeconds: 20, // Long polling
+          WaitTimeSeconds: 5,
           AttributeNames: ["All"],
           MessageAttributeNames: ["All"],
         });
@@ -57,75 +78,154 @@ export class WagerSqsConsumer implements OnModuleInit, OnModuleDestroy {
         const response = await this.sqsClient.send(command);
 
         if (response.Messages && response.Messages.length > 0) {
-          // Processa as mensagens concorrentemente
-          await Promise.all(response.Messages.map((msg) => this.processMessage(msg)));
+          await Promise.all(
+            response.Messages.map((msg) => {
+              const task = this.processMessage(msg).finally(() => {
+                this.inFlightMessages.delete(task);
+              });
+              this.inFlightMessages.add(task);
+              return task;
+            })
+          );
         }
       } catch (error) {
+        if (!this.isRunning) break;
         this.logger.error("Erro no polling do SQS", error);
-        // Pequena pausa antes de tentar novamente para não inundar os logs num cenário de falha de rede
         await new Promise((resolve) => setTimeout(resolve, 5000));
       }
     }
   }
 
-  private async processMessage(message: any): Promise<void> {
-    const { Body, ReceiptHandle, MessageId } = message;
+  public async processMessage(message: any): Promise<void> {
+    const { Body, ReceiptHandle, MessageId, Attributes } = message;
+    const receiveCount = parseInt(Attributes?.ApproximateReceiveCount ?? "1", 10);
 
     try {
       const parsedBody = JSON.parse(Body);
-      const payload: ProcessWagerInputDto = parsedBody.data;
-      
-      // O hash do payload serve para verificar divergências de idempotência
+      const envelopeId = parsedBody.messageId ?? MessageId;
+      const messageType = parsedBody.type ?? parsedBody.eventType;
+
+      // Se for um evento de integração publicado pelo Outbox na mesma fila (ex: WalletBalanceChanged),
+      // fazemos ACK sem invocar o use-case de comando.
+      if (
+        messageType &&
+        messageType !== "WagerTransactionRequested" &&
+        !parsedBody.data?.externalTransactionId
+      ) {
+        await this.ackMessage(ReceiptHandle);
+        return;
+      }
+
+      const payload: ProcessWagerInputDto = parsedBody.data ?? parsedBody;
+      if (!payload || !payload.kind || !payload.walletId || !payload.providerId) {
+        // Payload permanentemente malformado -> envia direto para DLQ
+        await this.moveToDlq(message, envelopeId, "Invalid message payload schema");
+        return;
+      }
+
       const payloadHash = this.generatePayloadHash(payload);
 
-      // Transação SQL que envolve o Inbox e o Processamento da Aposta
+      // Transação SQL única envolvendo Inbox + UseCase (Wallet, Ledger, WagerTx, Outbox)
       await this.uow.transaction(async (tx) => {
-        // 1. DEDUPLICAÇÃO (Inbox Pattern)
-        const existingInbox = await this.inboxRepository.findByConsumerAndMessageId(this.consumerName, MessageId, tx);
-        
+        const existingInbox = await this.inboxRepository.findByConsumerAndMessageId(
+          this.consumerName,
+          envelopeId,
+          tx
+        );
+
         if (existingInbox && existingInbox.isProcessed()) {
-          this.logger.log(`Mensagem SQS ${MessageId} já processada (Inbox). Ignorando...`);
-          return; 
+          this.logger.log(`Mensagem SQS ${envelopeId} já processada (Inbox). Ignorando redelivery.`);
+          return;
         }
 
-        // Se não existir, criamos o registo no Inbox
-        const inboxMessage = InboxMessage.receive({
-          messageId: MessageId,
-          consumerName: this.consumerName,
-          payloadHash: payloadHash,
-          receivedAt: new Date(),
-        });
+        const inboxMessage =
+          existingInbox ??
+          InboxMessage.receive({
+            messageId: envelopeId,
+            consumerName: this.consumerName,
+            payloadHash,
+            receivedAt: new Date(),
+          });
 
-        // 2. PROCESSAMENTO DO CASO DE USO
-        // O caso de uso processa a aposta (altera saldo, ledger e cria evento no outbox)
-        // NOTA: O seu caso de uso deve receber a transação 'tx' ou utilizar o contexto transacional do MikroORM
         const result = await this.useCase.execute(payload, tx);
-        
-        // 3. FINALIZA O INBOX
+
         inboxMessage.markProcessed(new Date());
         await this.inboxRepository.save(inboxMessage, tx);
-        
-        this.logger.log(`Mensagem SQS ${MessageId} processada com sucesso. Status da transação: ${result.status}`);
+
+        this.logger.log({
+          message: "Mensagem SQS processada com sucesso",
+          messageId: envelopeId,
+          transactionId: result.transactionId,
+          walletId: payload.walletId,
+          providerId: payload.providerId,
+          status: result.status,
+        });
       });
 
-      // 4. ACKNOWLEDGE (Apagar a mensagem da fila APÓS o commit)
-      await this.sqsClient.send(
-        new DeleteMessageCommand({
-          QueueUrl: this.queueUrl,
-          ReceiptHandle: ReceiptHandle,
-        })
+      // ACK somente APÓS o commit da transação SQL
+      await this.ackMessage(ReceiptHandle);
+    } catch (error) {
+      // Erros de domínio/negócio (ex: conflito de idempotência ou carteira inexistente) são permanentes -> DLQ ou ACK
+      if (error instanceof DomainException) {
+        this.logger.warn(`Erro permanente de domínio na mensagem SQS ${MessageId}: ${error.message}`);
+        await this.moveToDlq(message, MessageId, error.message);
+        return;
+      }
+
+      this.logger.error(
+        `Erro transitório ao processar mensagem SQS ${MessageId} (tentativa ${receiveCount}/${this.maxReceiveCount})`,
+        error
       );
 
-    } catch (error) {
-      // Falhas não tratadas (ex: erro no banco de dados) caem aqui.
-      // O SQS fará NACK (redelivery) porque não enviámos o DeleteMessageCommand.
-      this.logger.error(`Erro ao processar mensagem SQS ${MessageId}`, error);
+      if (receiveCount >= this.maxReceiveCount) {
+        await this.moveToDlq(message, MessageId, "Max receive count exceeded");
+      } else if (ReceiptHandle) {
+        // Backoff exponencial via VisibilityTimeout antes do próximo redelivery
+        const backoffSeconds = Math.min(Math.pow(2, receiveCount), 60);
+        try {
+          await this.sqsClient.send(
+            new ChangeMessageVisibilityCommand({
+              QueueUrl: this.queueUrl,
+              ReceiptHandle,
+              VisibilityTimeout: backoffSeconds,
+            })
+          );
+        } catch {
+          // Ignora se o cliente estiver desconectado no shutdown
+        }
+      }
+    }
+  }
+
+  private async ackMessage(receiptHandle?: string): Promise<void> {
+    if (!receiptHandle) return;
+    await this.sqsClient.send(
+      new DeleteMessageCommand({
+        QueueUrl: this.queueUrl,
+        ReceiptHandle: receiptHandle,
+      })
+    );
+  }
+
+  private async moveToDlq(message: any, messageId: string, reason: string): Promise<void> {
+    try {
+      await this.sqsClient.send(
+        new SendMessageCommand({
+          QueueUrl: this.dlqUrl,
+          MessageBody: message.Body,
+          MessageGroupId: message.Attributes?.MessageGroupId ?? "dlq-group",
+          MessageDeduplicationId: `dlq-${messageId}`,
+        })
+      );
+      await this.ackMessage(message.ReceiptHandle);
+      this.logger.warn(`Mensagem SQS ${messageId} movida para DLQ. Motivo: ${reason}`);
+    } catch (dlqError) {
+      this.logger.error(`Falha ao mover mensagem ${messageId} para DLQ`, dlqError);
     }
   }
 
   private generatePayloadHash(payload: any): string {
-    // Para simplificar, ordenamos as chaves e fazemos hash (poderia usar crypto.createHash)
-    const sortedString = JSON.stringify(payload, Object.keys(payload).sort());
-    return Buffer.from(sortedString).toString("base64");
+    const sortedString = JSON.stringify(payload ?? {}, Object.keys(payload ?? {}).sort());
+    return createHash("sha256").update(sortedString).digest("hex");
   }
 }

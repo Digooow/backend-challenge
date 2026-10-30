@@ -3,7 +3,8 @@ import { WagerTransaction } from "../../../domain/entities/wager-transaction";
 import { Money } from "../../../domain/value-objects/money";
 import { WagerTransactionRepositoryPort } from "../../../application/ports/wager-transaction.repository";
 import { WagerTransactionSchema, WagerTransactionEntity } from "../entities/wager-transaction.schema";
-import { LockMode } from "@mikro-orm/core";
+import { WagerTransactionKind } from "../../../domain/enums/wager-transaction-kind";
+import { WagerTransactionStatus } from "../../../domain/enums/wager-transaction-status";
 
 export class MikroOrmWagerTransactionRepository implements WagerTransactionRepositoryPort {
   constructor(private readonly globalEm: EntityManager) {}
@@ -31,6 +32,22 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     const entity = await em.findOne(WagerTransactionSchema, { providerId, externalTransactionId });
     if (!entity) return null;
     return this.toDomain(entity);
+  }
+
+  async findReversals(
+    providerId: string,
+    referenceExternalTransactionId: string,
+    kind: WagerTransactionKind,
+    tx?: unknown
+  ): Promise<WagerTransaction[]> {
+    const em = this.getEm(tx);
+    const entities = await em.find(WagerTransactionSchema, {
+      providerId,
+      referenceExternalTransactionId,
+      kind,
+      status: WagerTransactionStatus.Processed,
+    });
+    return entities.map((e) => this.toDomain(e));
   }
 
   async save(transaction: WagerTransaction, tx?: unknown): Promise<void> {
@@ -67,15 +84,14 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     }
   }
 
-  // MÉTODO ADICIONADO PARA O WORKER
   async findPendingReferences(limit: number, tx?: unknown): Promise<WagerTransaction[]> {
     const em = this.getEm(tx);
     const entities = await em.find(
       WagerTransactionSchema,
-      { status: 'PENDING_REFERENCE' as any },
-      { limit, orderBy: { createdAt: 'ASC' } }
+      { status: WagerTransactionStatus.PendingReference },
+      { limit, orderBy: { createdAt: "ASC" } }
     );
-    return entities.map(e => this.toDomain(e));
+    return entities.map((e) => this.toDomain(e));
   }
 
   private toDomain(entity: WagerTransactionEntity): WagerTransaction {

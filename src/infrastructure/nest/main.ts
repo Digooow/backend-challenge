@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { AppModule } from './app.module'; // Importado da mesma pasta
+import { AppModule } from './app.module';
 import { DomainExceptionFilter } from '../../presentation/filters/domain-exception.filter';
 import { ValidationPipe } from '@nestjs/common';
 import { JsonLoggerService } from '../observability/json-logger.service';
@@ -11,6 +11,9 @@ async function bootstrap() {
 
   // Ativa o logger estruturado em JSON globalmente
   app.useLogger(app.get(JsonLoggerService));
+
+  // Habilita hooks de encerramento gracioso (SIGTERM / SIGINT) para o consumidor SQS e conexões de banco
+  app.enableShutdownHooks();
 
   app.useGlobalFilters(new DomainExceptionFilter());
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
