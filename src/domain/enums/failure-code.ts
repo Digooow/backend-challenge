@@ -11,4 +11,4 @@ export const FailureCode = {
   NegativeBalanceProduced: "NEGATIVE_BALANCE_PRODUCED",
 } as const;
 
-export type FailureCode = keyof typeof FailureCode;
+export type FailureCode = (typeof FailureCode)[keyof typeof FailureCode];

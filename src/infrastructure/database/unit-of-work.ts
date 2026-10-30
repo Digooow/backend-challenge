@@ -4,7 +4,10 @@ import { UnitOfWorkPort } from "../../application/ports/unit-of-work.port";
 export class MikroOrmUnitOfWork implements UnitOfWorkPort {
   constructor(private readonly em: EntityManager) {}
 
-  async transaction<T>(work: (txManager: EntityManager) => Promise<T>): Promise<T> {
-    return this.em.transactional((forkedEm) => work(forkedEm));
+  async transaction<T>(work: (tx: unknown) => Promise<T>): Promise<T> {
+    // fork() garante um Identity Map novo e isolado para cada requisição concorrente
+    return this.em.fork().transactional(async (forkedEm) => {
+      return work(forkedEm);
+    });
   }
 }

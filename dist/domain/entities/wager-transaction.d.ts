@@ -1,0 +1,73 @@
+import { WagerTransactionKind } from "../enums/wager-transaction-kind";
+import { WagerTransactionStatus } from "../enums/wager-transaction-status";
+import { FailureCode } from "../enums/failure-code";
+import { Money } from "../value-objects/money";
+export interface CreateWagerTransactionProps {
+    id: string;
+    providerId: string;
+    externalTransactionId: string;
+    idempotencyKey: string;
+    payloadHash: string;
+    walletId: string;
+    playerId: string;
+    roundId: string;
+    gameId: string;
+    kind: WagerTransactionKind;
+    money: Money;
+    referenceExternalTransactionId?: string;
+    createdAt?: Date;
+}
+export interface WagerTransactionState {
+    id: string;
+    providerId: string;
+    externalTransactionId: string;
+    idempotencyKey: string;
+    payloadHash: string;
+    walletId: string;
+    playerId: string;
+    roundId: string;
+    gameId: string;
+    kind: WagerTransactionKind;
+    money: Money;
+    referenceExternalTransactionId?: string;
+    createdAt: Date;
+    status: WagerTransactionStatus;
+    referenceTransactionId?: string;
+    failureCode?: FailureCode;
+    processedAt?: Date;
+}
+export declare class WagerTransaction {
+    readonly id: string;
+    readonly providerId: string;
+    readonly externalTransactionId: string;
+    readonly idempotencyKey: string;
+    readonly payloadHash: string;
+    readonly walletId: string;
+    readonly playerId: string;
+    readonly roundId: string;
+    readonly gameId: string;
+    readonly kind: WagerTransactionKind;
+    readonly money: Money;
+    readonly referenceExternalTransactionId: string | undefined;
+    readonly createdAt: Date;
+    private _status;
+    private _referenceTransactionId?;
+    private _failureCode?;
+    private _processedAt?;
+    private constructor();
+    static create(props: CreateWagerTransactionProps): WagerTransaction;
+    static rehydrate(state: WagerTransactionState): WagerTransaction;
+    get status(): WagerTransactionStatus;
+    get referenceTransactionId(): string | undefined;
+    get failureCode(): FailureCode | undefined;
+    get processedAt(): Date | undefined;
+    markProcessed(referenceTransactionId: string | undefined, at?: Date): void;
+    markPendingReference(): void;
+    reject(code: FailureCode): void;
+    fail(code: FailureCode): void;
+    isTerminal(): boolean;
+    affectsBalance(): boolean;
+    requiresReference(): boolean;
+    matchesPayload(payloadHash: string): boolean;
+    private assertNotTerminal;
+}

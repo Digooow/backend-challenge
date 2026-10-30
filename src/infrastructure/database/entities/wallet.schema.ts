@@ -18,7 +18,7 @@ export const WalletSchema = new EntitySchema<WalletEntity>({
     playerId: { type: "string", index: true },
     currency: { type: "string", length: 3 },
     balance: { type: "decimal", precision: 19, scale: 2 },
-    version: { type: "integer", version: true }, // Optimistic Locking nativo do MikroORM
+    version: { type: "integer", default: 1 },
     createdAt: { type: "datetime" },
     updatedAt: { type: "datetime" },
   },

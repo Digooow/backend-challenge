@@ -1,5 +1,5 @@
 import { EntitySchema } from "@mikro-orm/core";
-import { LedgerDirection } from "../../../domain/enums/ledger-direction.ts";
+import { LedgerDirection } from "../../../domain/enums/ledger-direction";
 
 export interface WalletLedgerEntryEntity {
   id: string;

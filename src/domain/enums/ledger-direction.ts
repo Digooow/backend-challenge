@@ -3,5 +3,4 @@ export const LedgerDirection = {
   Credit: "CREDIT",
 } as const;
 
-
-export type LedgerDirection = keyof typeof LedgerDirection;
+export type LedgerDirection = (typeof LedgerDirection)[keyof typeof LedgerDirection];

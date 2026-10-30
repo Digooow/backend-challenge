@@ -6,4 +6,4 @@ export const WagerTransactionStatus = {
   Failed: "FAILED",
 } as const;
 
-export type WagerTransactionStatus = keyof typeof WagerTransactionStatus;
+export type WagerTransactionStatus = (typeof WagerTransactionStatus)[keyof typeof WagerTransactionStatus];

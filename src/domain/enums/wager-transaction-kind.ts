@@ -7,4 +7,4 @@ export const WagerTransactionKind = {
   Rollback: "ROLLBACK",
 } as const;
 
-export type WagerTransactionKind = keyof typeof WagerTransactionKind;
+export type WagerTransactionKind = (typeof WagerTransactionKind)[keyof typeof WagerTransactionKind];

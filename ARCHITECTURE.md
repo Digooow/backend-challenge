@@ -1,55 +1,35 @@
-# Architecture Documentation
+# Architecture & Technical Decisions
 
-## Overview
-This document describes the architectural decisions that satisfy the **eliminatory requirements** of the Jungle Gaming technical challenge. It is kept separate from the challenge README so that the README remains the public description of the problem.
+Este documento descreve as decisões arquiteturais e os trade-offs assumidos para satisfazer os requisitos rigorosos (e restrições eliminatórias) do desafio técnico da Jungle Gaming.
 
-## 1. Persistence & ORM
-- **ORM**: **MikroORM 7.x** (`@mikro-orm/*` packages) – provides Unit‑of‑Work, identity map and explicit transaction support.
-- **Database**: PostgreSQL.
-- **Money handling**: All monetary values are stored as `NUMERIC(20,2)` and manipulated in the domain using `big.js` (`big.js` wrapper `Money` class). No `number`, `float` or `double` is used.
-- **Constraints** (enforced at the DB level):
-  - `CHECK (balance >= 0)` on the `wallet` table.
-  - `UNIQUE (player_id, currency)` to guarantee one wallet per player/currency.
-  - Foreign‑key constraints for ledger entries, inbox/outbox, and wager transactions.
-- **Optimistic locking**: `version` column on `wallet` (incremented only when the balance changes). Updates are performed with `entityManager.lock(wallet, LockMode.OPTIMISTIC, version)`.
+## 1. Stack e Infraestrutura
+- **Runtime & Ecossistema:** Bun 1.x e NestJS. O Bun foi adotado pela sua velocidade de execução e test runner nativo ultrarrápido, essencial para rodar suites de concorrência intensas.
+- **ORM:** MikroORM v6. Escolhido pelo seu suporte nativo ao padrão *Unit of Work*, *Identity Map* explícito e controlo granular sobre transações e locks (essencial para o domínio financeiro).
+- **Base de Dados:** PostgreSQL 15.
+- **Mensageria:** AWS SQS emulado localmente via LocalStack.
 
-## 2. Migrations Strategy
-- **Versioned migrations** are required (challenge §5). They are created **exclusively via the CLI** (`npm run migration:create`) which guarantees the correct file layout and naming.
-- **Programmatic migration creation** (`orm.migrator.createMigration()`) is kept only for the optional `create` action of the helper script, but production environments should rely on the CLI.
-- **Dev workflow**: `npm run migration:sync` runs a **schema‑synchronisation** step (`SchemaGenerator.updateSchema()`). This updates the DB directly from the entity definitions without generating a migration file, avoiding the looping error you encountered.
-- **Production workflow**: `npm run migration:up` and `npm run migration:down` apply/revert versioned migrations. Because migrations are idempotent, multiple service instances can run them safely.
+## 2. Precisão Financeira e Modelo de Domínio
+- **Money Value Object:** O sistema não utiliza `number`, `float` ou `double`. Todos os valores monetários são encapsulados numa classe `Money` imutável, suportada internamente por bibliotecas de precisão decimal (`decimal.js`/`big.js`). No banco de dados, os valores são armazenados como `NUMERIC(20,2)`.
+- **Wallet (Aggregate Root):** Protege as invariantes de negócio. Garante que o saldo nunca fica negativo. 
+- **WalletLedgerEntry:** Implementa o conceito de *append-only*. Toda a alteração de saldo gera uma entrada imutável correspondente. Um check nativo de banco garante que `balance_before + amount = balance_after`.
 
-## 3. Idempotency & Concurrency
-- **InboxMessage** stores the `idempotencyKey` and a `processedAt` timestamp. Before processing an event the service checks that the message is not already marked as processed.
-- **Transactional boundary**: All changes to `wallet`, `wallet_ledger_entry`, `inbox_message` and `outbox_message` happen inside a single SQL transaction (`entityManager.transactional`). No event is published to SQS before the transaction commits (requirement 4).
-- **Optimistic locking** prevents lost updates when several instances debit/credit the same wallet concurrently (requirement 8).
-- **No in‑memory cache** is used for idempotency (requirement 2).
+## 3. Estratégia de Concorrência (Pessimistic Locking)
+Para cumprir o requisito de suportar múltiplas instâncias e resolver o problema de "hot wallets" (ex: 50 apostas simultâneas na mesma carteira), optou-se pelo **Pessimistic Locking** (`LockMode.PESSIMISTIC_WRITE` gerando `SELECT ... FOR UPDATE` no PostgreSQL).
 
-## 4. Messaging
-- **AWS SQS (LocalStack)** is used for external communication. The internal processing pipeline treats SQS messages as *at‑least‑once*; missing references generate a `PENDING_REFERENCE` status and are re‑processed by a scheduled worker (challenge §7.1).
-- **Outbox pattern**: `OutboxMessage` is persisted within the same transaction as the domain changes and a separate background worker reads the outbox and publishes to SQS, guaranteeing exactly‑once delivery from the perspective of the service.
+**Justificativa:**
+Embora o Optimistic Locking (`version`) seja útil para sistemas com baixa contenção, em cenários de iGaming onde uma carteira pode receber rajadas de eventos simultâneos, o locking otimista geraria uma alta taxa de rejeições técnicas (conflitos de versão) e exigiria complexas lógicas de *retry* exponencial na camada de aplicação. O lock pessimista delega o enfileiramento transacional diretamente ao PostgreSQL, garantindo que as operações ocorram sequencialmente a nível de linha, sem *lost updates*, sem saldo negativo e mantendo o determinismo absoluto demonstrado nos testes de stress.
 
-## 5. Domain Model Highlights
-- **Money** – immutable value object (`big.js` based). Stored as two columns (`amount NUMERIC`, `currency VARCHAR`).
-- **Wallet** – aggregate root with strict invariants: single wallet per player/currency, never negative balance, versioned for optimistic locking.
-- **WalletLedgerEntry** – immutable, creates a record for every balance‑affecting transaction. Enforced `CHECK (balance_before + amount = balance_after)` in the DB.
-- **WagerTransaction** – state machine with explicit terminal states (`PROCESSED`, `REJECTED`, `FAILED`). Idempotency key ensures duplicate messages are ignored.
+## 4. Consistência Transacional (Inbox e Outbox)
+O sistema evita a falha clássica de "publicar o evento na fila antes de commitar no banco". A consistência é garantida pelo padrão **Transactional Outbox & Inbox**.
+- **Atomicidade:** A transação do domínio (`Wallet`, `WagerTransaction`, `WalletLedgerEntry`), o registo de deduplicação (`InboxMessage`) e o evento de integração (`OutboxMessage`) são gravados na mesma exata transação SQL via `UnitOfWork`.
+- **Worker Desacoplado:** Um Cron/Worker em background faz *polling* da tabela Outbox e publica de forma segura no SQS, garantindo a entrega *at-least-once*.
+- **Idempotência Persistente:** Rejeitamos o uso de cache em memória (ex: Redis). A idempotência é controlada a nível de banco de dados verificando chaves únicas (`idempotencyKey`) ou pelo `Inbox` antes de iniciar uma nova transação financeira.
 
-## 6. Scripts
-| Script | Description |
-|--------|-------------|
-| `npm run migration:sync` | Syncs schema directly from entities – used in local development. |
-| `npm run migration:up` | Applies all pending versioned migrations. |
-| `npm run migration:down` | Rolls back the last migration batch. |
-| `npm run migration:create -- -n <name>` | Generates a new migration file via CLI (the only approved way for production). |
+## 5. Referências Ausentes e Assincronismo
+- Uma transação do tipo `REFUND` ou `ROLLBACK` pode chegar antes da `BET` original devido ao assincronismo do provedor.
+- O sistema assume o estado `PENDING_REFERENCE` de forma segura. Um worker em background efetua *retries* programados até a referência original surgir e ser transacionada, finalizando o fluxo. 
 
-The helper script `src/infrastructure/database/run-migrations.ts` implements these actions. It uses the correct `orm.migrator` property (MikroORM 7) and falls back to `SchemaGenerator` for the `sync` command.
-
-## 7. How the current error was solved
-- The original code called `orm.getMigrator()` which does **not exist** in MikroORM 7, causing the compile‑time error.
-- The script was rewritten to use `orm.migrator` and to expose a **`sync`** command that avoids generating migrations programmatically.
-- Documentation of this approach was moved to **ARCHITECTURE.md** so the public README stays focused on the challenge description.
-
----
-*This file is intended for internal reviewers and for future contributors to understand the decisions that keep the solution compliant with all eliminatory constraints.*
-
+## 6. Estratégia de Testes
+Em vez de depender de mocks que mascaram falhas de integração, os testes foram desenhados sobre instâncias reais através do Docker Compose:
+- **Testes de Integração:** Validam o fluxo completo interagindo com o PostgreSQL real e LocalStack. Para evitar falhas da API de *schema generation* em runtime, os scripts de setup (como `setup-test-db.ts`) implementam um *fallback* robusto com instruções SQL nativas (`DROP SCHEMA public CASCADE...`).
+- **Testes de Concorrência:** O comportamento atómico foi comprovado matematicamente disparando dezenas de instâncias de `Promise.all` simultâneas contra o Unit of Work, atestando a eficácia do isolamento transacional.

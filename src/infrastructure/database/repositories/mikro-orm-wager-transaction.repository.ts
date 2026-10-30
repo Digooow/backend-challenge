@@ -3,6 +3,7 @@ import { WagerTransaction } from "../../../domain/entities/wager-transaction";
 import { Money } from "../../../domain/value-objects/money";
 import { WagerTransactionRepositoryPort } from "../../../application/ports/wager-transaction.repository";
 import { WagerTransactionSchema, WagerTransactionEntity } from "../entities/wager-transaction.schema";
+import { LockMode } from "@mikro-orm/core";
 
 export class MikroOrmWagerTransactionRepository implements WagerTransactionRepositoryPort {
   constructor(private readonly globalEm: EntityManager) {}
@@ -64,6 +65,17 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
       };
       em.persist(em.create(WagerTransactionSchema, entity));
     }
+  }
+
+  // MÉTODO ADICIONADO PARA O WORKER
+  async findPendingReferences(limit: number, tx?: unknown): Promise<WagerTransaction[]> {
+    const em = this.getEm(tx);
+    const entities = await em.find(
+      WagerTransactionSchema,
+      { status: 'PENDING_REFERENCE' as any },
+      { limit, orderBy: { createdAt: 'ASC' } }
+    );
+    return entities.map(e => this.toDomain(e));
   }
 
   private toDomain(entity: WagerTransactionEntity): WagerTransaction {

@@ -1,13 +1,14 @@
 import { defineConfig } from "@mikro-orm/postgresql";
 import { Migrator } from "@mikro-orm/migrations";
-import { WalletSchema } from "./entities/wallet.schema.ts";
-import { WalletLedgerEntrySchema } from "./entities/wallet-ledger-entry.schema.ts";
-import { WagerTransactionSchema } from "./entities/wager-transaction.schema.ts";
-import { InboxMessageSchema } from "./entities/inbox-message.schema.ts";
+import { WalletSchema } from "./entities/wallet.schema";
+import { WalletLedgerEntrySchema } from "./entities/wallet-ledger-entry.schema";
+import { WagerTransactionSchema } from "./entities/wager-transaction.schema";
+import { InboxMessageSchema } from "./entities/inbox-message.schema";
 import { OutboxMessageSchema } from "./entities/outbox-message.schema";
 
 export default defineConfig({
   extensions: [Migrator],
+  allowGlobalContext: true,
   host: process.env.DB_HOST ?? "localhost",
   port: Number(process.env.DB_PORT ?? 5433),
   user: process.env.DB_USER ?? "jungle_user",

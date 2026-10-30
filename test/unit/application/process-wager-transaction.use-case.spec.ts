@@ -20,15 +20,23 @@ class InMemoryWalletRepo implements WalletRepositoryPort {
   async findById(id: string): Promise<Wallet | null> {
     return this.wallets.get(id) ?? null;
   }
+
+  async findByIdForUpdate(id: string): Promise<Wallet | null> {
+    return this.findById(id);
+  }
+
   async findByPlayerAndCurrency(): Promise<Wallet | null> {
     return null;
   }
+
   async save(wallet: Wallet): Promise<void> {
     this.wallets.set(wallet.id, wallet);
   }
+
   async saveLedgerEntry(entry: WalletLedgerEntry): Promise<void> {
     this.entries.push(entry);
   }
+
   async getLedgerEntries(): Promise<WalletLedgerEntry[]> {
     return this.entries;
   }
@@ -40,28 +48,52 @@ class InMemoryWagerTxRepo implements WagerTransactionRepositoryPort {
   async findById(id: string): Promise<WagerTransaction | null> {
     return this.transactions.get(id) ?? null;
   }
+
   async findByIdempotencyKey(key: string): Promise<WagerTransaction | null> {
     for (const tx of this.transactions.values()) {
       if (tx.idempotencyKey === key) return tx;
     }
     return null;
   }
-  async findByProviderAndExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null> {
+
+  async findByProviderAndExternalId(
+    providerId: string,
+    externalTransactionId: string,
+  ): Promise<WagerTransaction | null> {
     for (const tx of this.transactions.values()) {
-      if (tx.providerId === providerId && tx.externalTransactionId === externalTransactionId) return tx;
+      if (
+        tx.providerId === providerId &&
+        tx.externalTransactionId === externalTransactionId
+      ) {
+        return tx;
+      }
     }
     return null;
   }
+
   async save(transaction: WagerTransaction): Promise<void> {
     this.transactions.set(transaction.id, transaction);
+  }
+
+  async findPendingReferences(limit: number): Promise<WagerTransaction[]> {
+    const pending: WagerTransaction[] = [];
+    for (const tx of this.transactions.values()) {
+      if (tx.status === WagerTransactionStatus.PendingReference) {
+        pending.push(tx);
+        if (pending.length >= limit) break;
+      }
+    }
+    return pending;
   }
 }
 
 class InMemoryOutboxRepo implements OutboxRepositoryPort {
   messages: OutboxMessage[] = [];
+
   async save(message: OutboxMessage): Promise<void> {
     this.messages.push(message);
   }
+
   async findPending(): Promise<OutboxMessage[]> {
     return this.messages;
   }
@@ -79,11 +111,25 @@ describe("ProcessWagerTransactionUseCase (Unit)", () => {
   let outboxRepo: InMemoryOutboxRepo;
   let useCase: ProcessWagerTransactionUseCase;
 
+  const defaultProps = {
+    providerId: "provider-a",
+    walletId: "wallet-1",
+    playerId: "player-1",
+    roundId: "round-1",
+    gameId: "game-1",
+    money: { amount: "50.00", currency: "BRL" },
+  };
+
   beforeEach(() => {
     walletRepo = new InMemoryWalletRepo();
     wagerTxRepo = new InMemoryWagerTxRepo();
     outboxRepo = new InMemoryOutboxRepo();
-    useCase = new ProcessWagerTransactionUseCase(walletRepo, wagerTxRepo, outboxRepo, new DirectUnitOfWork());
+    useCase = new ProcessWagerTransactionUseCase(
+      walletRepo,
+      wagerTxRepo,
+      outboxRepo,
+      new DirectUnitOfWork(),
+    );
 
     const { wallet } = Wallet.open({
       id: "wallet-1",
@@ -95,12 +141,8 @@ describe("ProcessWagerTransactionUseCase (Unit)", () => {
 
   it("deve processar uma aposta BET com sucesso e gravar no Outbox", async () => {
     const result = await useCase.execute({
-      providerId: "provider-a",
+      ...defaultProps,
       externalTransactionId: "ext-1",
-      walletId: "wallet-1",
-      playerId: "player-1",
-      roundId: "round-1",
-      gameId: "game-1",
       kind: WagerTransactionKind.Bet,
       money: { amount: "25.00", currency: "BRL" },
     });
@@ -113,12 +155,8 @@ describe("ProcessWagerTransactionUseCase (Unit)", () => {
 
   it("deve retornar replay idempotente para a mesma requisição", async () => {
     const input = {
-      providerId: "provider-a",
+      ...defaultProps,
       externalTransactionId: "ext-1",
-      walletId: "wallet-1",
-      playerId: "player-1",
-      roundId: "round-1",
-      gameId: "game-1",
       kind: WagerTransactionKind.Bet,
       money: { amount: "25.00", currency: "BRL" },
     };
@@ -132,12 +170,8 @@ describe("ProcessWagerTransactionUseCase (Unit)", () => {
 
   it("deve rejeitar aposta se o saldo for insuficiente", async () => {
     const result = await useCase.execute({
-      providerId: "provider-a",
+      ...defaultProps,
       externalTransactionId: "ext-2",
-      walletId: "wallet-1",
-      playerId: "player-1",
-      roundId: "round-1",
-      gameId: "game-1",
       kind: WagerTransactionKind.Bet,
       money: { amount: "150.00", currency: "BRL" },
     });
@@ -145,5 +179,79 @@ describe("ProcessWagerTransactionUseCase (Unit)", () => {
     expect(result.status).toBe(WagerTransactionStatus.Rejected);
     expect(result.failureCode).toBe(FailureCode.InsufficientBalance);
     expect(result.balance?.amount).toBe("100.00");
+  });
+
+  it("deve processar WIN e creditar o saldo na carteira", async () => {
+    const result = await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-win-1",
+      kind: WagerTransactionKind.Win,
+      money: { amount: "150.00", currency: "BRL" },
+    });
+
+    expect(result.status).toBe(WagerTransactionStatus.Processed);
+    expect(result.balance?.amount).toBe("250.00");
+    expect(outboxRepo.messages.length).toBe(1);
+  });
+
+  it("deve processar LOSS sem alterar o saldo", async () => {
+    const result = await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-loss-1",
+      kind: WagerTransactionKind.Loss,
+      money: { amount: "50.00", currency: "BRL" },
+    });
+
+    expect(result.status).toBe(WagerTransactionStatus.Processed);
+    expect(result.balance?.amount).toBe("100.00");
+  });
+
+  it("deve definir estado PENDING_REFERENCE caso REFUND seja recebido sem a aposta original", async () => {
+    const result = await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-refund-orphan",
+      kind: WagerTransactionKind.Refund,
+      referenceExternalTransactionId: "ext-bet-missing",
+    });
+
+    expect(result.status).toBe(WagerTransactionStatus.PendingReference);
+  });
+
+  it("deve reverter BET com sucesso ao receber REFUND da aposta correspondente", async () => {
+    await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-bet-10",
+      kind: WagerTransactionKind.Bet,
+      money: { amount: "50.00", currency: "BRL" },
+    });
+
+    const result = await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-refund-10",
+      kind: WagerTransactionKind.Refund,
+      referenceExternalTransactionId: "ext-bet-10",
+      money: { amount: "50.00", currency: "BRL" },
+    });
+
+    expect(result.status).toBe(WagerTransactionStatus.Processed);
+    expect(result.balance?.amount).toBe("100.00");
+  });
+
+  it("deve rejeitar reuso da idempotency key quando o payload for divergente", async () => {
+    await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-bet-100",
+      kind: WagerTransactionKind.Bet,
+      money: { amount: "20.00", currency: "BRL" },
+    });
+
+    expect(
+      useCase.execute({
+        ...defaultProps,
+        externalTransactionId: "ext-bet-100",
+        kind: WagerTransactionKind.Bet,
+        money: { amount: "999.00", currency: "BRL" },
+      }),
+    ).rejects.toThrow("Payload conflitante");
   });
 });

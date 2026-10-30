@@ -1,16 +1,16 @@
-import { createHash } from "node:crypto";
-import { DomainException } from "../../domain/exceptions/domain.exception";
-import { Money } from "../../domain/value-objects/money";
-import { WagerTransaction } from "../../domain/entities/wager-transaction";
-import { WagerTransactionKind } from "../../domain/enums/wager-transaction-kind";
-import { FailureCode } from "../../domain/enums/failure-code";
-import { OutboxMessage } from "../../domain/entities/outbox-message";
-import { WalletBalanceChanged } from "../../domain/events/wallet-balance-changed.event";
-import { WalletRepositoryPort } from "../ports/wallet.repository";
-import { WagerTransactionRepositoryPort } from "../ports/wager-transaction.repository";
-import { OutboxRepositoryPort } from "../ports/outbox.repository";
-import { UnitOfWorkPort } from "../ports/unit-of-work.port";
-import { ProcessWagerInputDto, ProcessWagerOutputDto } from "../dtos/process-wager.dto";
+import { createHash } from 'node:crypto';
+import { DomainException } from '../../domain/exceptions/domain.exception';
+import { Money } from '../../domain/value-objects/money';
+import { WagerTransaction } from '../../domain/entities/wager-transaction';
+import { WagerTransactionKind } from '../../domain/enums/wager-transaction-kind';
+import { FailureCode } from '../../domain/enums/failure-code';
+import { OutboxMessage } from '../../domain/entities/outbox-message';
+import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed.event';
+import { WalletRepositoryPort } from '../ports/wallet.repository';
+import { WagerTransactionRepositoryPort } from '../ports/wager-transaction.repository';
+import { OutboxRepositoryPort } from '../ports/outbox.repository';
+import { UnitOfWorkPort } from '../ports/unit-of-work.port';
+import { ProcessWagerInputDto, ProcessWagerOutputDto } from '../dtos/process-wager.dto';
 
 export class ProcessWagerTransactionUseCase {
   constructor(
@@ -20,7 +20,7 @@ export class ProcessWagerTransactionUseCase {
     private readonly uow: UnitOfWorkPort,
   ) {}
 
-  async execute(input: ProcessWagerInputDto): Promise<ProcessWagerOutputDto> {
+  async execute(input: ProcessWagerInputDto, tx?: unknown): Promise<ProcessWagerOutputDto> {
     const idempotencyKey = input.idempotencyKey ?? `${input.providerId}:${input.externalTransactionId}`;
     const payloadHash = this.calculatePayloadHash(input);
     const correlationId = input.correlationId ?? crypto.randomUUID();
@@ -31,7 +31,7 @@ export class ProcessWagerTransactionUseCase {
 
       if (existingTx) {
         if (!existingTx.matchesPayload(payloadHash)) {
-          throw new DomainException("Payload conflitante para a mesma Idempotency Key.");
+          throw new DomainException('Payload conflitante para a mesma Idempotency Key.');
         }
 
         const wallet = await this.walletRepo.findById(existingTx.walletId, tx);
@@ -45,9 +45,10 @@ export class ProcessWagerTransactionUseCase {
         };
       }
 
-      // 2. Validações de domínio iniciais
       const operationMoney = Money.from(input.money);
-      const wallet = await this.walletRepo.findById(input.walletId, tx);
+
+      // 2. Lock Pessimista na carteira para garantir consistência
+      const wallet = await this.walletRepo.findByIdForUpdate(input.walletId, tx);
 
       if (!wallet) {
         throw new DomainException(`Carteira ${input.walletId} não encontrada.`);
@@ -135,7 +136,7 @@ export class ProcessWagerTransactionUseCase {
           }
         }
       } catch (err: unknown) {
-        if (err instanceof DomainException && err.message.includes("Saldo insuficiente")) {
+        if (err instanceof DomainException && err.message.includes('Saldo insuficiente')) {
           wagerTx.reject(FailureCode.InsufficientBalance);
           await this.wagerTxRepo.save(wagerTx, tx);
         } else {
@@ -165,6 +166,6 @@ export class ProcessWagerTransactionUseCase {
       walletId: input.walletId,
     };
 
-    return createHash("sha256").update(JSON.stringify(canonicalObject)).digest("hex");
+    return createHash('sha256').update(JSON.stringify(canonicalObject)).digest('hex');
   }
 }
