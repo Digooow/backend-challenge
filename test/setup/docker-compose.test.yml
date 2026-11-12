@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
 
   localstack-test:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3.8.0
     container_name: backend-challenge-localstack-test
     environment:
       - SERVICES=sqs
@@ -28,7 +28,7 @@ services:
     ports:
       - "4567:4566" 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 5s
       timeout: 5s
       retries: 10

@@ -72,4 +72,38 @@ describe("WagerTransaction Entity", () => {
 
     expect(() => tx.markProcessed(undefined)).toThrow("estado terminal");
   });
+
+  it("deve proibir criação externa de transação OPENING ou com valor zero", () => {
+    expect(() =>
+      WagerTransaction.create({
+        ...defaultProps,
+        kind: WagerTransactionKind.Opening,
+      }),
+    ).toThrow("OPENING");
+
+    expect(() =>
+      WagerTransaction.create({
+        ...defaultProps,
+        money: Money.zero("BRL"),
+      }),
+    ).toThrow("estritamente positivo");
+  });
+
+  it("deve determinar corretamente a direção no ledger para ROLLBACK de BET e WIN", () => {
+    const betTx = WagerTransaction.create(defaultProps);
+    const winTx = WagerTransaction.create({
+      ...defaultProps,
+      id: "tx-win",
+      kind: WagerTransactionKind.Win,
+    });
+    const rollbackTx = WagerTransaction.create({
+      ...defaultProps,
+      id: "tx-rb",
+      kind: WagerTransactionKind.Rollback,
+      referenceExternalTransactionId: "ext-1",
+    });
+
+    expect(rollbackTx.ledgerDirectionFor(betTx)).toBe("CREDIT");
+    expect(rollbackTx.ledgerDirectionFor(winTx)).toBe("DEBIT");
+  });
 });

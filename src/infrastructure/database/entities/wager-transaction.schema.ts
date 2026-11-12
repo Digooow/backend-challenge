@@ -51,4 +51,11 @@ export const WagerTransactionSchema = new EntitySchema<WagerTransactionEntity>({
     { name: "unique_idempotency_key", properties: ["idempotencyKey"] },
     { name: "unique_provider_external_id", properties: ["providerId", "externalTransactionId"] },
   ],
+  indexes: [
+    { name: "wager_transactions_status_created_at_idx", properties: ["status", "createdAt"] },
+    {
+      name: "wager_transactions_provider_ref_ext_idx",
+      properties: ["providerId", "referenceExternalTransactionId"],
+    },
+  ],
 });

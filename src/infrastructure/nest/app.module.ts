@@ -2,7 +2,7 @@ import { EntityManager } from '@mikro-orm/postgresql';
 import { Module } from '@nestjs/common';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { ScheduleModule } from '@nestjs/schedule';
-import config from '../database/mikro-orm.config';
+import { getMikroOrmConfig } from '../database/mikro-orm.config';
 import { PendingReferenceWorker } from '../jobs/pending-reference.worker';
 import { MikroOrmInboxRepository } from '../database/repositories/mikro-orm-inbox.repository';
 
@@ -34,7 +34,9 @@ import { MetricsService } from '../observability/metrics.service';
 
 @Module({
   imports: [
-    MikroOrmModule.forRoot(config as any),
+    MikroOrmModule.forRootAsync({
+      useFactory: () => getMikroOrmConfig() as any,
+    }),
     ScheduleModule.forRoot(),
   ],
   controllers: [HealthController, WalletController, WagerController],
@@ -48,8 +50,9 @@ import { MetricsService } from '../observability/metrics.service';
     { provide: 'MessagePublisherPort', useClass: LocalstackSqsClient },
     {
       provide: PendingReferenceWorker,
-      useFactory: (wagerTxRepo, useCase, uow) => new PendingReferenceWorker(wagerTxRepo, useCase, uow),
-      inject: ['WagerTransactionRepositoryPort', ProcessWagerTransactionUseCase, 'UnitOfWorkPort'],
+      useFactory: (wagerTxRepo, useCase, uow, metrics) =>
+        new PendingReferenceWorker(wagerTxRepo, useCase, uow, metrics),
+      inject: ['WagerTransactionRepositoryPort', ProcessWagerTransactionUseCase, 'UnitOfWorkPort', MetricsService],
     },
     { provide: 'InboxRepositoryPort', useFactory: (em) => new MikroOrmInboxRepository(em), inject: [EntityManager] },
 
@@ -62,30 +65,45 @@ import { MetricsService } from '../observability/metrics.service';
     },
     {
       provide: ProcessWagerTransactionUseCase,
-      useFactory: (walletRepo, wagerTxRepo, outboxRepo, uow) =>
-        new ProcessWagerTransactionUseCase(walletRepo, wagerTxRepo, outboxRepo, uow),
-      inject: ['WalletRepositoryPort', 'WagerTransactionRepositoryPort', 'OutboxRepositoryPort', 'UnitOfWorkPort'],
+      useFactory: (walletRepo, wagerTxRepo, outboxRepo, uow, metrics) =>
+        new ProcessWagerTransactionUseCase(walletRepo, wagerTxRepo, outboxRepo, uow, metrics),
+      inject: [
+        'WalletRepositoryPort',
+        'WagerTransactionRepositoryPort',
+        'OutboxRepositoryPort',
+        'UnitOfWorkPort',
+        MetricsService,
+      ],
     },
     {
       provide: ReconcileWalletUseCase,
-      useFactory: (walletRepo) => new ReconcileWalletUseCase(walletRepo),
-      inject: ['WalletRepositoryPort'],
+      useFactory: (walletRepo, metrics) => new ReconcileWalletUseCase(walletRepo, metrics),
+      inject: ['WalletRepositoryPort', MetricsService],
     },
 
     // Background Workers
     {
       provide: OutboxPublisher,
-      useFactory: (outboxRepo, publisher, uow) =>
-        new OutboxPublisher(outboxRepo, publisher, uow, process.env.SQS_WAGER_QUEUE_URL || 'http://localhost:4566/000000000000/wager-transactions.fifo'),
-      inject: ['OutboxRepositoryPort', 'MessagePublisherPort', 'UnitOfWorkPort'],
+      useFactory: (outboxRepo, publisher, uow, metrics) =>
+        new OutboxPublisher(
+          outboxRepo,
+          publisher,
+          uow,
+          process.env.SQS_OUTBOX_QUEUE_URL ||
+            process.env.SQS_WAGER_QUEUE_URL ||
+            `${process.env.SQS_ENDPOINT || 'http://localhost:4566'}/000000000000/wager-transactions.fifo`,
+          metrics,
+        ),
+      inject: ['OutboxRepositoryPort', 'MessagePublisherPort', 'UnitOfWorkPort', MetricsService],
     },
     OutboxRelayWorker,
     {
       provide: WagerSqsConsumer,
-      useFactory: (useCase, inboxRepo, uow) => new WagerSqsConsumer(useCase, inboxRepo, uow),
-      inject: [ProcessWagerTransactionUseCase, 'InboxRepositoryPort', 'UnitOfWorkPort'],
-    }
+      useFactory: (useCase, inboxRepo, uow, metrics) =>
+        new WagerSqsConsumer(useCase, inboxRepo, uow, metrics),
+      inject: [ProcessWagerTransactionUseCase, 'InboxRepositoryPort', 'UnitOfWorkPort', MetricsService],
+    },
   ],
   exports: [JsonLoggerService, MetricsService],
 })
-export class AppModule { }
+export class AppModule {}

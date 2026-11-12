@@ -447,4 +447,45 @@ describe("ProcessWagerTransactionUseCase (Unit)", () => {
     expect(resolvedRes.transactionId).toBe(pendingRes.transactionId);
     expect(resolvedRes.balance?.amount).toBe("100.00");
   });
+
+  it("deve validar referência de BET em operação WIN quando fornecida (Seção 7)", async () => {
+    await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-bet-win-ref",
+      kind: WagerTransactionKind.Bet,
+      money: { amount: "20.00", currency: "BRL" },
+    });
+
+    const validWin = await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-win-valid-ref",
+      kind: WagerTransactionKind.Win,
+      referenceExternalTransactionId: "ext-bet-win-ref",
+      money: { amount: "80.00", currency: "BRL" },
+    });
+    expect(validWin.status).toBe(WagerTransactionStatus.Processed);
+    expect(validWin.balance?.amount).toBe("160.00");
+
+    const invalidWin = await useCase.execute({
+      ...defaultProps,
+      externalTransactionId: "ext-win-bad-ref",
+      kind: WagerTransactionKind.Win,
+      referenceExternalTransactionId: "non-existent-bet",
+      money: { amount: "50.00", currency: "BRL" },
+    });
+    expect(invalidWin.status).toBe(WagerTransactionStatus.Rejected);
+    expect(invalidWin.failureCode).toBe(FailureCode.InvalidReferenceKind);
+  });
+
+  it("deve rejeitar operação se playerId não for o dono da carteira", async () => {
+    expect(
+      useCase.execute({
+        ...defaultProps,
+        playerId: "intruder-player",
+        externalTransactionId: "ext-intruder",
+        kind: WagerTransactionKind.Bet,
+        money: { amount: "10.00", currency: "BRL" },
+      }),
+    ).rejects.toThrow("não pertence ao jogador");
+  });
 });

@@ -43,6 +43,7 @@ export class MikroOrmOutboxRepository implements OutboxRepositoryPort {
       OutboxMessageSchema,
       {
         publishedAt: null,
+        attempts: { $lt: OutboxMessage.MAX_ATTEMPTS },
         $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: now } }],
       },
       {
@@ -64,5 +65,13 @@ export class MikroOrmOutboxRepository implements OutboxRepositoryPort {
         publishedAt: e.publishedAt,
       }),
     );
+  }
+
+  async countPending(tx?: unknown): Promise<number> {
+    const em = this.getEm(tx);
+    return em.count(OutboxMessageSchema, {
+      publishedAt: null,
+      attempts: { $lt: OutboxMessage.MAX_ATTEMPTS },
+    });
   }
 }

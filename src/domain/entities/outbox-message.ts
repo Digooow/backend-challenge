@@ -7,11 +7,13 @@ export interface OutboxMessageState {
   payload: Record<string, unknown>;
   occurredAt: Date;
   attempts: number;
-  nextAttemptAt?: Date;
-  publishedAt?: Date;
+  nextAttemptAt?: Date | null;
+  publishedAt?: Date | null;
 }
 
 export class OutboxMessage {
+  public static readonly MAX_ATTEMPTS = 10;
+
   private constructor(
     public readonly id: string,
     public readonly aggregateId: string,
@@ -42,8 +44,8 @@ export class OutboxMessage {
       state.payload,
       state.occurredAt,
       state.attempts,
-      state.nextAttemptAt,
-      state.publishedAt,
+      state.nextAttemptAt ?? undefined,
+      state.publishedAt ?? undefined,
     );
   }
 
@@ -60,11 +62,15 @@ export class OutboxMessage {
   }
 
   isPending(): boolean {
-    return this._publishedAt === undefined;
+    return this._publishedAt == null;
+  }
+
+  hasExceededMaxAttempts(maxAttempts: number = OutboxMessage.MAX_ATTEMPTS): boolean {
+    return this._attempts >= maxAttempts;
   }
 
   isDue(now: Date = new Date()): boolean {
-    if (!this.isPending()) return false;
+    if (!this.isPending() || this.hasExceededMaxAttempts()) return false;
     if (!this._nextAttemptAt) return true;
     return this._nextAttemptAt <= now;
   }

@@ -1,5 +1,68 @@
 # Technical Challenge — Distributed Wagering Processor
 
+> **Documentação Técnica da Implementação:**
+> - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — Arquitetura detalhada, controle de concorrência, idempotência pós-lock, Inbox/Outbox, retry/DLQ e referências fora de ordem.
+> - [`VALIDATION.md`](./VALIDATION.md) — Matriz completa de validação (48 testes unitários, integração, 8 cenários de concorrência da Seção 13 e teste de carga).
+
+---
+
+## Quickstart, Setup & Guia de Engenharia
+
+### 1. Pré-requisitos
+- **Bun** `>= 1.1`
+- **Docker** & **Docker Compose**
+
+### 2. Subindo o Ambiente Completo (Cluster Multi-Instância com 3 Réplicas + Nginx)
+O [`docker-compose.yml`](./docker-compose.yml) provisiona PostgreSQL 15, LocalStack (SQS FIFO + DLQ), **3 réplicas da API (`api-1`, `api-2`, `api-3`)** e um **Nginx Load Balancer** na porta `3000`:
+
+```bash
+# Subir toda a infraestrutura + 3 réplicas da API balanceadas pelo Nginx
+docker compose up -d --build
+
+# Ou subir apenas PostgreSQL (5433) e LocalStack (4566) para rodar a API localmente via Bun
+docker compose up -d postgres localstack
+bun install
+bun run migration:up
+bun run start:dev
+```
+
+### 3. Comandos Principais (`package.json`)
+
+| Comando | Descrição |
+|---|---|
+| `bun run build` | Compila o projeto com TypeScript em modo estrito (`strict: true`). |
+| `bun run start:dev` | Inicia a aplicação NestJS em modo watch com Bun. |
+| `bun run migration:up` | Executa as migrations versionadas no PostgreSQL (`InitSchema` + constraints + trigger append-only). |
+| `bun run test:unit` | Executa a suíte de testes unitários (`48` testes em `test/unit`). |
+| `bun run test:integration` | Executa os testes de integração com PostgreSQL (`test/integration`). |
+| `bun run test:concurrency` | Executa os 8 cenários obrigatórios de concorrência e resiliência (`test/concurrency`). |
+| `bun run test:load` | Executa o benchmark de carga e estresse de *hot wallet* (`test/load/load-test.ts`). |
+
+### 4. Variáveis de Ambiente (`.env.example`)
+
+| Variável | Default | Descrição |
+|---|---|---|
+| `PORT` | `3000` | Porta HTTP da aplicação NestJS |
+| `INSTANCE_ID` | `api-local` | Identificador da réplica nos logs e headers |
+| `DB_HOST` / `DB_PORT` | `localhost` / `5433` | Host e porta do PostgreSQL (testes usam `5434` com fallback automático para `5433`) |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `postgres` / `postgres` / `wagering_db` | Credenciais e database principal |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | `2` / `25` | Pool de conexões do PostgreSQL por instância |
+| `SQS_ENDPOINT` | `http://localhost:4566` | Endpoint do AWS SQS (LocalStack) |
+| `SQS_WAGER_QUEUE_URL` | `http://localhost:4566/000000000000/wager-transactions.fifo` | URL da fila principal FIFO |
+| `SQS_WAGER_DLQ_URL` | `http://localhost:4566/000000000000/wager-transactions-dlq.fifo` | URL da Dead Letter Queue FIFO |
+
+### 5. Decisões de Engenharia, Trade-offs e Evoluções Futuras
+
+- **Controle de Concorrência (`SELECT ... FOR UPDATE` + Re-check Pós-Lock):** Adotamos lock pessimista na linha da `Wallet` (`LockMode.PESSIMISTIC_WRITE`) aliado à re-verificação de `Idempotency-Key` e `(providerId, externalTransactionId)` **após** adquirir o lock. Isso elimina corridas de `UniqueConstraintViolationException (23505)` quando 50 requisições duplicadas chegam no mesmo milissegundo e mantém paralelismo total entre carteiras diferentes.
+- **Consistência Transacional (Transactional Outbox + Inbox Pattern):** Todas as mutações de `Wallet`, `WalletLedgerEntry`, `WagerTransaction` e `OutboxMessage` ocorrem na mesma transação SQL. Workers de `OutboxPublisher` e `PendingReferenceWorker` utilizam `FOR UPDATE SKIP LOCKED` (`LockMode.PESSIMISTIC_PARTIAL_WRITE`) para operar concorrentemente nas 3 réplicas sem duplicidade.
+- **Reconciliação O(1) no Banco e Paginação Keyset Opaca:** A reconciliação (`POST /wallets/:walletId/reconciliation`) calcula `SUM(CREDIT - DEBIT)` diretamente via SQL no PostgreSQL, e o extrato (`GET /wallets/:walletId/ledger`) utiliza cursor opaco Base64 sobre `(created_at, id)` com ordenação determinística `DESC`.
+- **O que faríamos diferente com mais tempo:**
+  1. **Change Data Capture (CDC) para o Outbox:** Substituir o polling de 1s do `OutboxRelayWorker` por leitura do WAL do PostgreSQL (Debezium / Logical Replication) para latência sub-10ms sem queries periódicas.
+  2. **Particionamento Declarativo do Ledger:** Particionar `wallet_ledger_entries` e `wager_transactions` por intervalo mensal ou hash de `wallet_id` para manter índices B-Tree enxutos na casa de centenas de milhões de lançamentos.
+  3. **Integração OIDC Completa no Docker Compose:** Incluir um container **Zitadel** ou **Keycloak** pré-configurado com realm de provedores conectado ao `ProviderAuthGuard`.
+
+---
+
 ## Bem-vindo à Jungle Gaming 🦧
 
 A **Jungle Gaming** é uma software house especializada em iGaming — desenvolvemos plataformas de cassino online com tecnologia de ponta: NestJS, Bun, TanStack, DDD e arquitetura orientada a eventos. Somos apaixonados por engenharia de software e acreditamos que grandes produtos nascem de grandes times.

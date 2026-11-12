@@ -9,18 +9,18 @@ async function bootstrap() {
     bufferLogs: true,
   });
 
-  // Ativa o logger estruturado em JSON globalmente
-  app.useLogger(app.get(JsonLoggerService));
+  const logger = app.get(JsonLoggerService);
+  app.useLogger(logger);
 
   // Habilita hooks de encerramento gracioso (SIGTERM / SIGINT) para o consumidor SQS e conexões de banco
   app.enableShutdownHooks();
 
   app.useGlobalFilters(new DomainExceptionFilter());
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
-  
+
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`Jungle Gaming backend running on port ${port}`);
+  logger.log(`Jungle Gaming backend running on port ${port}`, 'Bootstrap');
 }
 
 bootstrap();

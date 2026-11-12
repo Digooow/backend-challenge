@@ -13,23 +13,40 @@ export class Money {
   ) {}
 
   static from(props: MoneyProps): Money {
-    if (typeof props.amount !== "string") {
-      throw new DomainException("O valor monetário deve ser uma string.");
+    if (!props || typeof props.amount !== "string") {
+      throw DomainException.validation("O valor monetário deve ser uma string.");
     }
 
-    if (!/^-?\d+\.\d{2}$/.test(props.amount)) {
-      throw new DomainException("Escala exata de 2 casas exigida (ex: '25.00').");
+    if (typeof props.currency !== "string" || !/^[A-Z]{3}$/.test(props.currency)) {
+      throw DomainException.validation(
+        "Moeda inválida: deve seguir o padrão ISO-4217 (3 letras maiúsculas, ex: 'BRL').",
+      );
+    }
+
+    if (props.amount.startsWith("-")) {
+      throw DomainException.validation(
+        "Valores monetários negativos não são permitidos em contratos de entrada.",
+      );
+    }
+
+    if (!/^\d+\.\d{2}$/.test(props.amount)) {
+      throw DomainException.validation("Escala exata de 2 casas exigida (ex: '25.00').");
     }
 
     try {
       const bigValue = new Big(props.amount);
       return new Money(bigValue, props.currency);
     } catch {
-      throw new DomainException("Valor financeiro inválido.");
+      throw DomainException.validation("Valor financeiro inválido.");
     }
   }
 
   static zero(currency: string): Money {
+    if (typeof currency !== "string" || !/^[A-Z]{3}$/.test(currency)) {
+      throw DomainException.validation(
+        "Moeda inválida: deve seguir o padrão ISO-4217 (3 letras maiúsculas, ex: 'BRL').",
+      );
+    }
     return new Money(new Big("0.00"), currency);
   }
 

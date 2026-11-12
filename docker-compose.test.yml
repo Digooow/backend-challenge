@@ -28,14 +28,13 @@ services:
     ports:
       - "4567:4566" # Alterado para 4567 para não conflitar
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 5s
       timeout: 5s
       retries: 10
     volumes:
       - localstack-data-test:/tmp/localstack
-      # Mapeamento do script de inicialização das filas
-      - ../../init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
+      - ./init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh
     restart: unless-stopped
 
 volumes:

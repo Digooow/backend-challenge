@@ -30,6 +30,9 @@ export const WalletLedgerEntrySchema = new EntitySchema<WalletLedgerEntryEntity>
   uniques: [
     { name: "unique_wallet_transaction_ledger", properties: ["walletId", "transactionId"] },
   ],
+  indexes: [
+    { name: "wallet_ledger_entries_cursor_idx", properties: ["walletId", "createdAt", "id"] },
+  ],
   checks: [
     { name: "check_positive_ledger_amount", expression: "amount > 0" },
     {

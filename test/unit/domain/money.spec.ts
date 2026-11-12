@@ -8,12 +8,18 @@ describe("Money Value Object", () => {
     expect(money.currency).toBe("BRL");
   });
 
-  it("deve rejeitar entradas inválidas (números, notação científica, escala incorreta)", () => {
+  it("deve rejeitar entradas inválidas (números, notação científica, escala incorreta, negativos e moeda inválida)", () => {
     // @ts-expect-error - Testando bloqueio do TypeScript contra number
     expect(() => Money.from({ amount: 25.00, currency: "BRL" })).toThrow();
     expect(() => Money.from({ amount: "25", currency: "BRL" })).toThrow("Escala exata de 2 casas exigida");
     expect(() => Money.from({ amount: "NaN", currency: "BRL" })).toThrow();
+    expect(() => Money.from({ amount: "Infinity", currency: "BRL" })).toThrow();
+    expect(() => Money.from({ amount: "1e2", currency: "BRL" })).toThrow();
+    expect(() => Money.from({ amount: "", currency: "BRL" })).toThrow();
     expect(() => Money.from({ amount: "25.001", currency: "BRL" })).toThrow("Escala exata de 2 casas exigida");
+    expect(() => Money.from({ amount: "-10.00", currency: "BRL" })).toThrow("negativos");
+    expect(() => Money.from({ amount: "10.00", currency: "brl" })).toThrow("ISO-4217");
+    expect(() => Money.from({ amount: "10.00", currency: "" })).toThrow("ISO-4217");
   });
 
   it("deve realizar adição mantendo a imutabilidade", () => {

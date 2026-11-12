@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from "bun:test";
+import { describe, it, beforeAll, afterAll, expect, mock } from "bun:test";
 import { EntityManager } from "@mikro-orm/postgresql";
 
 import { setupTestDb, teardownTestDb } from "../setup/setup-test-db";
@@ -9,8 +9,12 @@ import type { ProcessWagerInputDto } from "../../src/application/dtos/process-wa
 import { MikroOrmWalletRepository } from "../../src/infrastructure/database/repositories/mikro-orm-wallet.repository";
 import { MikroOrmWagerTransactionRepository } from "../../src/infrastructure/database/repositories/mikro-orm-wager-transaction.repository";
 import { MikroOrmOutboxRepository } from "../../src/infrastructure/database/repositories/mikro-orm-outbox.repository";
+import { MikroOrmInboxRepository } from "../../src/infrastructure/database/repositories/mikro-orm-inbox.repository";
 import { MikroOrmUnitOfWork } from "../../src/infrastructure/database/unit-of-work";
 import { OutboxPublisher } from "../../src/infrastructure/messaging/outbox/outbox.publisher";
+import { PendingReferenceWorker } from "../../src/infrastructure/jobs/pending-reference.worker";
+import { WagerSqsConsumer } from "../../src/infrastructure/messaging/sqs/wager-sqs.consumer";
+import { MetricsService } from "../../src/infrastructure/observability/metrics.service";
 import type { MessagePublisherPort, PublishOptions } from "../../src/application/ports/message-publisher.port";
 
 import { Wallet } from "../../src/domain/entities/wallet";
@@ -19,7 +23,7 @@ import { WagerTransactionKind } from "../../src/domain/enums/wager-transaction-k
 import { WagerTransactionStatus } from "../../src/domain/enums/wager-transaction-status";
 import { FailureCode } from "../../src/domain/enums/failure-code";
 
-describe("Wallet race condition (concurrency)", () => {
+describe("Distributed Wagering Concurrency & Resilience Suite (Seção 13.1 a 13.8)", () => {
   let orm: any;
   let em: EntityManager;
   let walletRepo: MikroOrmWalletRepository;
@@ -28,26 +32,39 @@ describe("Wallet race condition (concurrency)", () => {
   let uow: MikroOrmUnitOfWork;
   let useCase: ProcessWagerTransactionUseCase;
   let reconcileUseCase: ReconcileWalletUseCase;
-  let walletId: string;
-  let playerId: string;
+  let metrics: MetricsService;
 
-  beforeAll(async () => {
-    orm = await setupTestDb();
+  const createIsolatedInstance = () => {
+    const instanceEm = (orm.em.fork() as unknown) as EntityManager;
+    const instanceWalletRepo = new MikroOrmWalletRepository(instanceEm);
+    const instanceWagerRepo = new MikroOrmWagerTransactionRepository(instanceEm);
+    const instanceOutboxRepo = new MikroOrmOutboxRepository(instanceEm);
+    const instanceInboxRepo = new MikroOrmInboxRepository(instanceEm);
+    const instanceUow = new MikroOrmUnitOfWork(instanceEm);
+    const instanceUseCase = new ProcessWagerTransactionUseCase(
+      instanceWalletRepo,
+      instanceWagerRepo,
+      instanceOutboxRepo,
+      instanceUow,
+      metrics,
+    );
+    return {
+      em: instanceEm,
+      walletRepo: instanceWalletRepo,
+      wagerRepo: instanceWagerRepo,
+      outboxRepo: instanceOutboxRepo,
+      inboxRepo: instanceInboxRepo,
+      uow: instanceUow,
+      useCase: instanceUseCase,
+    };
+  };
 
-    em = (orm.em.fork() as unknown) as EntityManager;
-    walletRepo = new MikroOrmWalletRepository(em);
-    wagerTxRepo = new MikroOrmWagerTransactionRepository(em);
-    outboxRepo = new MikroOrmOutboxRepository(em);
-    uow = new MikroOrmUnitOfWork(em);
-    useCase = new ProcessWagerTransactionUseCase(walletRepo, wagerTxRepo, outboxRepo, uow);
-    reconcileUseCase = new ReconcileWalletUseCase(walletRepo);
-
-    playerId = `player-${crypto.randomUUID()}`;
-
+  const openAndPersistWallet = async (amount: string, currency = "USD") => {
+    const pId = `player-${crypto.randomUUID()}`;
     const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
       id: crypto.randomUUID(),
-      playerId,
-      initialBalance: Money.from({ amount: "100.00", currency: "USD" }),
+      playerId: pId,
+      initialBalance: Money.from({ amount, currency }),
     });
 
     const setupEm = (orm.em.fork() as unknown) as EntityManager;
@@ -58,7 +75,20 @@ describe("Wallet race condition (concurrency)", () => {
     if (openingLedgerEntry) await setupRepo.saveLedgerEntry(openingLedgerEntry);
     await setupEm.flush();
 
-    walletId = wallet.id;
+    return { walletId: wallet.id, playerId: pId };
+  };
+
+  beforeAll(async () => {
+    orm = await setupTestDb();
+    metrics = new MetricsService();
+
+    em = (orm.em.fork() as unknown) as EntityManager;
+    walletRepo = new MikroOrmWalletRepository(em);
+    wagerTxRepo = new MikroOrmWagerTransactionRepository(em);
+    outboxRepo = new MikroOrmOutboxRepository(em);
+    uow = new MikroOrmUnitOfWork(em);
+    useCase = new ProcessWagerTransactionUseCase(walletRepo, wagerTxRepo, outboxRepo, uow, metrics);
+    reconcileUseCase = new ReconcileWalletUseCase(walletRepo, metrics);
   });
 
   afterAll(async () => {
@@ -66,8 +96,52 @@ describe("Wallet race condition (concurrency)", () => {
   });
 
   it(
-    "processes 50 concurrent BETs of 80.00 correctly against a 100.00 balance (Seção 8 e 13.2)",
+    "Cenário 13.1: Mesma aposta enviada 50 vezes em paralelo (mesma Idempotency-Key) resulta em 1 débito e 49 replays idempotentes sem erro 500",
     async () => {
+      const { walletId, playerId } = await openAndPersistWallet("100.00", "USD");
+      const sharedExtId = `ext-dup-50-${crypto.randomUUID()}`;
+      const sharedIdemKey = `provider-dup:${sharedExtId}`;
+
+      const input: ProcessWagerInputDto = {
+        providerId: "provider-dup",
+        externalTransactionId: sharedExtId,
+        idempotencyKey: sharedIdemKey,
+        playerId,
+        walletId,
+        roundId: "round-dup-1",
+        gameId: "fortune-tiger",
+        kind: WagerTransactionKind.Bet,
+        money: { amount: "25.00", currency: "USD" },
+      };
+
+      const results = await Promise.all(
+        Array.from({ length: 50 }, () => createIsolatedInstance().useCase.execute(input)),
+      );
+
+      const originals = results.filter((r) => !r.idempotentReplay);
+      const replays = results.filter((r) => r.idempotentReplay);
+
+      expect(originals).toHaveLength(1);
+      expect(replays).toHaveLength(49);
+
+      for (const r of results) {
+        expect(r.status).toBe(WagerTransactionStatus.Processed);
+        expect(r.transactionId).toBe(originals[0].transactionId);
+        expect(r.balance?.amount).toBe("75.00");
+      }
+
+      const recon = await reconcileUseCase.execute(walletId);
+      expect(recon.consistent).toBe(true);
+      expect(recon.storedBalance.amount).toBe("75.00");
+      expect(recon.checkedEntries).toBe(2); // OPENING + 1 BET
+    },
+    30000,
+  );
+
+  it(
+    "Cenário 13.2: 50 apostas distintas de 80.00 em paralelo contra saldo de 100.00 -> 1 PROCESSED e 49 REJECTED (INSUFFICIENT_BALANCE)",
+    async () => {
+      const { walletId, playerId } = await openAndPersistWallet("100.00", "USD");
       const concurrencyCount = 50;
 
       const promises = Array.from({ length: concurrencyCount }, (_, i) => {
@@ -81,20 +155,20 @@ describe("Wallet race condition (concurrency)", () => {
           kind: WagerTransactionKind.Bet,
           money: { amount: "80.00", currency: "USD" },
         };
-        return useCase.execute(input);
+        return createIsolatedInstance().useCase.execute(input);
       });
 
       const results = await Promise.all(promises);
 
-      const processed = results.filter((r) => r.status === (WagerTransactionStatus.Processed as any));
-      const rejected = results.filter((r) => r.status === (WagerTransactionStatus.Rejected as any));
+      const processed = results.filter((r) => r.status === WagerTransactionStatus.Processed);
+      const rejected = results.filter((r) => r.status === WagerTransactionStatus.Rejected);
 
       expect(processed).toHaveLength(1);
       expect(rejected).toHaveLength(49);
       expect(processed[0].balance?.amount).toBe("20.00");
 
       for (const rej of rejected) {
-        expect(rej.failureCode).toBe(FailureCode.InsufficientBalance as any);
+        expect(rej.failureCode).toBe(FailureCode.InsufficientBalance);
         expect(rej.balance?.amount).toBe("20.00");
       }
 
@@ -110,32 +184,18 @@ describe("Wallet race condition (concurrency)", () => {
   );
 
   it(
-    "processes multiple distinct wallets in parallel without cross-wallet contention (Seção 13.3)",
+    "Cenário 13.3: Operações concorrentes em múltiplas carteiras distintas sem contenção cruzada",
     async () => {
       const walletCount = 10;
       const wallets: { walletId: string; playerId: string }[] = [];
 
-      const setupEm = (orm.em.fork() as unknown) as EntityManager;
-      const setupRepo = new MikroOrmWalletRepository(setupEm);
-      const setupTxRepo = new MikroOrmWagerTransactionRepository(setupEm);
-
       for (let i = 0; i < walletCount; i++) {
-        const pId = `player-parallel-${i}-${crypto.randomUUID()}`;
-        const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
-          id: crypto.randomUUID(),
-          playerId: pId,
-          initialBalance: Money.from({ amount: "100.00", currency: "BRL" }),
-        });
-        await setupRepo.save(wallet);
-        if (openingTransaction) await setupTxRepo.save(openingTransaction);
-        if (openingLedgerEntry) await setupRepo.saveLedgerEntry(openingLedgerEntry);
-        wallets.push({ walletId: wallet.id, playerId: pId });
+        wallets.push(await openAndPersistWallet("100.00", "BRL"));
       }
-      await setupEm.flush();
 
       const results = await Promise.all(
         wallets.map((w, idx) =>
-          useCase.execute({
+          createIsolatedInstance().useCase.execute({
             providerId: "provider-multi",
             externalTransactionId: `ext-multi-${idx}-${crypto.randomUUID()}`,
             playerId: w.playerId,
@@ -164,7 +224,119 @@ describe("Wallet race condition (concurrency)", () => {
   );
 
   it(
-    "allows two concurrent OutboxPublishers to relay messages using FOR UPDATE SKIP LOCKED without duplicate publishing (Seção 13.6)",
+    "Cenário 13.4: 3 instâncias independentes da aplicação operando concorrentemente sobre a mesma carteira",
+    async () => {
+      const { walletId, playerId } = await openAndPersistWallet("500.00", "BRL");
+      const instances = [createIsolatedInstance(), createIsolatedInstance(), createIsolatedInstance()];
+
+      // 30 operações de BET de 10.00 distribuídas entre as 3 instâncias simultaneamente
+      const betPromises = Array.from({ length: 30 }, (_, idx) => {
+        const inst = instances[idx % 3];
+        return inst.useCase.execute({
+          providerId: "provider-3inst",
+          externalTransactionId: `bet-3inst-${idx}-${crypto.randomUUID()}`,
+          playerId,
+          walletId,
+          roundId: `round-3inst-${idx}`,
+          gameId: "aviator",
+          kind: WagerTransactionKind.Bet,
+          money: { amount: "10.00", currency: "BRL" },
+        });
+      });
+
+      const results = await Promise.all(betPromises);
+      expect(results.every((r) => r.status === WagerTransactionStatus.Processed)).toBe(true);
+
+      const recon = await reconcileUseCase.execute(walletId);
+      expect(recon.consistent).toBe(true);
+      expect(recon.storedBalance.amount).toBe("200.00");
+      expect(recon.checkedEntries).toBe(31); // 1 OPENING + 30 BETs
+    },
+    30000,
+  );
+
+  it(
+    "Cenário 13.5: Queda de worker após commit do DB e antes do ACK no SQS -> redelivery deduplicado via Inbox",
+    async () => {
+      const { walletId, playerId } = await openAndPersistWallet("100.00", "BRL");
+      const sqsMessageId = `msg-crash-${crypto.randomUUID()}`;
+      const extId = `ext-crash-${crypto.randomUUID()}`;
+
+      let shouldFailAckOnFirstCall = true;
+      const ackedHandles: string[] = [];
+
+      const mockSqs = {
+        send: mock(async (cmd: any) => {
+          if (cmd.constructor?.name === "DeleteMessageCommand") {
+            if (shouldFailAckOnFirstCall) {
+              shouldFailAckOnFirstCall = false;
+              throw new Error("Simulated worker crash / network drop before SQS ACK");
+            }
+            ackedHandles.push(cmd.input.ReceiptHandle);
+          }
+          return {};
+        }),
+        destroy: mock(() => {}),
+      } as any;
+
+      const inst1 = createIsolatedInstance();
+      const consumer1 = new WagerSqsConsumer(
+        inst1.useCase,
+        inst1.inboxRepo,
+        inst1.uow,
+        metrics,
+        mockSqs,
+      );
+
+      const sqsPayload = {
+        MessageId: sqsMessageId,
+        ReceiptHandle: "rh-attempt-1",
+        Attributes: { ApproximateReceiveCount: "1" },
+        Body: JSON.stringify({
+          type: "WagerTransactionRequested",
+          data: {
+            providerId: "pragmatic",
+            externalTransactionId: extId,
+            playerId,
+            walletId,
+            roundId: "round-crash-1",
+            gameId: "gates-of-olympus",
+            kind: "BET",
+            money: { amount: "40.00", currency: "BRL" },
+          },
+        }),
+      };
+
+      // 1ª execução: comita no banco mas falha ao enviar o ACK para o SQS
+      await consumer1.processMessage(sqsPayload);
+
+      // 2ª execução (em outra instância após o visibility timeout): SQS reentrega a mesma mensagem
+      const inst2 = createIsolatedInstance();
+      const consumer2 = new WagerSqsConsumer(
+        inst2.useCase,
+        inst2.inboxRepo,
+        inst2.uow,
+        metrics,
+        mockSqs,
+      );
+      await consumer2.processMessage({
+        ...sqsPayload,
+        ReceiptHandle: "rh-attempt-2",
+        Attributes: { ApproximateReceiveCount: "2" },
+      });
+
+      expect(ackedHandles).toContain("rh-attempt-2");
+
+      const recon = await reconcileUseCase.execute(walletId);
+      expect(recon.consistent).toBe(true);
+      expect(recon.storedBalance.amount).toBe("60.00");
+      expect(recon.checkedEntries).toBe(2); // Debitado uma única vez!
+    },
+    30000,
+  );
+
+  it(
+    "Cenário 13.6: 2 OutboxPublishers concorrentes publicam mensagens usando FOR UPDATE SKIP LOCKED sem duplicação",
     async () => {
       const publishedIds: string[] = [];
 
@@ -175,32 +347,89 @@ describe("Wallet race condition (concurrency)", () => {
         },
       };
 
-      const em1 = (orm.em.fork() as unknown) as EntityManager;
-      const em2 = (orm.em.fork() as unknown) as EntityManager;
+      const inst1 = createIsolatedInstance();
+      const inst2 = createIsolatedInstance();
 
       const publisher1 = new OutboxPublisher(
-        new MikroOrmOutboxRepository(em1),
+        inst1.outboxRepo,
         fakeBroker,
-        new MikroOrmUnitOfWork(em1),
+        inst1.uow,
         "http://localhost:4566/000000000000/wager-transactions.fifo",
+        metrics,
       );
       const publisher2 = new OutboxPublisher(
-        new MikroOrmOutboxRepository(em2),
+        inst2.outboxRepo,
         fakeBroker,
-        new MikroOrmUnitOfWork(em2),
+        inst2.uow,
         "http://localhost:4566/000000000000/wager-transactions.fifo",
+        metrics,
       );
 
-      // Dispara os 2 publishers simultaneamente sobre a mesma tabela outbox_messages
       await Promise.all([
         publisher1.processPendingMessages(50),
         publisher2.processPendingMessages(50),
       ]);
 
-      // Nenhum eventId deve ter sido publicado em duplicidade pelos dois workers concorrentes
       const uniqueIds = new Set(publishedIds);
       expect(uniqueIds.size).toBe(publishedIds.length);
       expect(publishedIds.length).toBeGreaterThan(0);
+    },
+    30000,
+  );
+
+  it(
+    "Cenário 13.7 e 13.8: REFUND chega antes da BET (PENDING_REFERENCE), BET chega depois e workers concorrentes reconciliam com consistência total",
+    async () => {
+      const { walletId, playerId } = await openAndPersistWallet("100.00", "BRL");
+      const betExtId = `bet-late-${crypto.randomUUID()}`;
+      const refundExtId = `refund-early-${crypto.randomUUID()}`;
+
+      // 1. REFUND chega antes da BET -> deve ficar PENDING_REFERENCE sem alterar o saldo
+      const refundInitial = await createIsolatedInstance().useCase.execute({
+        providerId: "evolution",
+        externalTransactionId: refundExtId,
+        playerId,
+        walletId,
+        roundId: "round-out-of-order",
+        gameId: "roulette",
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: betExtId,
+        money: { amount: "30.00", currency: "BRL" },
+      });
+
+      expect(refundInitial.status).toBe(WagerTransactionStatus.PendingReference);
+
+      // 2. BET chega depois -> debita 30.00 (saldo vai a 70.00) e reconcilia ou permite ao worker reconciliar o REFUND
+      const betRes = await createIsolatedInstance().useCase.execute({
+        providerId: "evolution",
+        externalTransactionId: betExtId,
+        playerId,
+        walletId,
+        roundId: "round-out-of-order",
+        gameId: "roulette",
+        kind: WagerTransactionKind.Bet,
+        money: { amount: "30.00", currency: "BRL" },
+      });
+      expect(betRes.status).toBe(WagerTransactionStatus.Processed);
+
+      // 3. Dois PendingReferenceWorkers concorrentes rodam ao mesmo tempo (FOR UPDATE SKIP LOCKED)
+      const wInst1 = createIsolatedInstance();
+      const wInst2 = createIsolatedInstance();
+      const worker1 = new PendingReferenceWorker(wInst1.wagerRepo, wInst1.useCase, wInst1.uow, metrics);
+      const worker2 = new PendingReferenceWorker(wInst2.wagerRepo, wInst2.useCase, wInst2.uow, metrics);
+
+      await Promise.all([worker1.handle(), worker2.handle()]);
+
+      // 4. Verifica que o REFUND foi processado exatamente uma vez, restaurando o saldo para 100.00
+      const checkInst = createIsolatedInstance();
+      const resolvedRefund = await checkInst.wagerRepo.findByProviderAndExternalId("evolution", refundExtId);
+      expect(resolvedRefund?.status).toBe(WagerTransactionStatus.Processed);
+
+      const finalRecon = await reconcileUseCase.execute(walletId);
+      expect(finalRecon.consistent).toBe(true);
+      expect(finalRecon.storedBalance.amount).toBe("100.00");
+      expect(finalRecon.calculatedBalance.amount).toBe("100.00");
+      expect(finalRecon.checkedEntries).toBe(3); // OPENING (+100), BET (-30), REFUND (+30)
     },
     30000,
   );

@@ -1,7 +1,6 @@
 import { describe, it, beforeAll, afterAll, expect } from "bun:test";
 import { MikroORM, EntityManager } from "@mikro-orm/postgresql";
 
-// Importando o setup correto
 import { setupTestDb, teardownTestDb } from "../setup/setup-test-db";
 
 import { ProcessWagerTransactionUseCase } from "../../src/application/use-cases/process-wager-transaction.use-case";
@@ -28,9 +27,8 @@ describe("Wager processing (integration)", () => {
   let useCase: ProcessWagerTransactionUseCase;
 
   beforeAll(async () => {
-    // Usando a função que apaga e recria o banco de dados corretamente
     orm = await setupTestDb();
-    
+
     em = (orm.em.fork() as unknown) as EntityManager;
 
     walletRepo = new MikroOrmWalletRepository(em);
@@ -54,7 +52,7 @@ describe("Wager processing (integration)", () => {
     const playerId = `player-${crypto.randomUUID()}`;
     const currency = "USD";
 
-    const { wallet, openingLedgerEntry } = Wallet.open({
+    const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
       id: crypto.randomUUID(),
       playerId,
       initialBalance: Money.from({ amount: "100.00", currency }),
@@ -62,7 +60,11 @@ describe("Wager processing (integration)", () => {
 
     const setupEm = (orm.em.fork() as unknown) as EntityManager;
     const setupRepo = new MikroOrmWalletRepository(setupEm);
+    const setupTxRepo = new MikroOrmWagerTransactionRepository(setupEm);
     await setupRepo.save(wallet);
+    if (openingTransaction) {
+      await setupTxRepo.save(openingTransaction);
+    }
     if (openingLedgerEntry) {
       await setupRepo.saveLedgerEntry(openingLedgerEntry);
     }
@@ -87,10 +89,10 @@ describe("Wager processing (integration)", () => {
     expect(result.balance?.amount).toBe("90.00");
   });
 
-  it("deve retornar replay idempotente para a mesma transação", async () => {
+  it("deve retornar replay idempotente para a mesma transação com o saldo histórico original (Regra 7)", async () => {
     const playerId = `player-idem-${crypto.randomUUID()}`;
     const currency = "USD";
-    const { wallet, openingLedgerEntry } = Wallet.open({
+    const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
       id: crypto.randomUUID(),
       playerId,
       initialBalance: Money.from({ amount: "200.00", currency }),
@@ -98,7 +100,11 @@ describe("Wager processing (integration)", () => {
 
     const setupEm = (orm.em.fork() as unknown) as EntityManager;
     const setupRepo = new MikroOrmWalletRepository(setupEm);
+    const setupTxRepo = new MikroOrmWagerTransactionRepository(setupEm);
     await setupRepo.save(wallet);
+    if (openingTransaction) {
+      await setupTxRepo.save(openingTransaction);
+    }
     if (openingLedgerEntry) {
       await setupRepo.saveLedgerEntry(openingLedgerEntry);
     }
@@ -117,18 +123,27 @@ describe("Wager processing (integration)", () => {
 
     const first = await useCase.execute(input);
     expect(first.idempotentReplay).toBe(false);
+    expect(first.balance?.amount).toBe("175.00");
 
+    // Outra aposta altera o saldo atual da carteira para 150.00
+    await useCase.execute({
+      ...input,
+      externalTransactionId: `ext-idem-other-${crypto.randomUUID()}`,
+    });
+
+    // O replay da primeira aposta deve retornar o saldo histórico 175.00
     const second = await useCase.execute(input);
 
     expect(second.idempotentReplay).toBe(true);
     expect(second.transactionId).toBe(first.transactionId);
+    expect(second.balance?.amount).toBe("175.00");
   });
 
   it("deve rejeitar BET se o saldo for insuficiente", async () => {
     const playerId = `player-broke-${crypto.randomUUID()}`;
     const currency = "USD";
 
-    const { wallet, openingLedgerEntry } = Wallet.open({
+    const { wallet, openingLedgerEntry, openingTransaction } = Wallet.open({
       id: crypto.randomUUID(),
       playerId,
       initialBalance: Money.zero(currency),
@@ -136,7 +151,11 @@ describe("Wager processing (integration)", () => {
 
     const setupEm = (orm.em.fork() as unknown) as EntityManager;
     const setupRepo = new MikroOrmWalletRepository(setupEm);
+    const setupTxRepo = new MikroOrmWagerTransactionRepository(setupEm);
     await setupRepo.save(wallet);
+    if (openingTransaction) {
+      await setupTxRepo.save(openingTransaction);
+    }
     if (openingLedgerEntry) {
       await setupRepo.saveLedgerEntry(openingLedgerEntry);
     }

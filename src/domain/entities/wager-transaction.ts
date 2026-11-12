@@ -34,13 +34,21 @@ export interface WagerTransactionState {
   gameId: string;
   kind: WagerTransactionKind;
   money: Money;
-  referenceExternalTransactionId?: string;
+  referenceExternalTransactionId?: string | null;
   createdAt: Date;
   status: WagerTransactionStatus;
-  referenceTransactionId?: string;
-  failureCode?: FailureCode;
-  processedAt?: Date;
+  referenceTransactionId?: string | null;
+  failureCode?: FailureCode | null;
+  processedAt?: Date | null;
 }
+
+const ALLOWED_EXTERNAL_KINDS = new Set<string>([
+  WagerTransactionKind.Bet,
+  WagerTransactionKind.Win,
+  WagerTransactionKind.Loss,
+  WagerTransactionKind.Refund,
+  WagerTransactionKind.Rollback,
+]);
 
 export class WagerTransaction {
   private constructor(
@@ -65,7 +73,15 @@ export class WagerTransaction {
 
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     if (props.kind === WagerTransactionKind.Opening) {
-      throw new DomainException("Transação OPENING é de uso estritamente interno da carteira.");
+      throw DomainException.validation("Transação OPENING é de uso estritamente interno da carteira.");
+    }
+
+    if (!ALLOWED_EXTERNAL_KINDS.has(props.kind)) {
+      throw DomainException.validation(`Tipo de operação inválido: ${String(props.kind)}.`);
+    }
+
+    if (props.money.isZero() || props.money.isNegative()) {
+      throw DomainException.validation("O valor da transação deve ser estritamente positivo.");
     }
 
     const tx = new WagerTransaction(
@@ -80,13 +96,13 @@ export class WagerTransaction {
       props.gameId,
       props.kind,
       props.money,
-      props.referenceExternalTransactionId,
+      props.referenceExternalTransactionId ?? undefined,
       props.createdAt ?? new Date(),
       WagerTransactionStatus.Pending,
     );
 
     if (tx.requiresReference() && !tx.referenceExternalTransactionId) {
-      throw new DomainException(`A operação ${props.kind} exige referenceExternalTransactionId.`);
+      throw DomainException.validation(`A operação ${props.kind} exige referenceExternalTransactionId.`);
     }
 
     return tx;
@@ -135,12 +151,12 @@ export class WagerTransaction {
       state.gameId,
       state.kind,
       state.money,
-      state.referenceExternalTransactionId,
+      state.referenceExternalTransactionId ?? undefined,
       state.createdAt,
       state.status,
-      state.referenceTransactionId,
-      state.failureCode,
-      state.processedAt,
+      state.referenceTransactionId ?? undefined,
+      state.failureCode ?? undefined,
+      state.processedAt ?? undefined,
     );
   }
 

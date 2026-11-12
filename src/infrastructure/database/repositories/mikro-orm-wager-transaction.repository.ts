@@ -1,4 +1,4 @@
-import { EntityManager } from "@mikro-orm/postgresql";
+import { EntityManager, LockMode } from "@mikro-orm/postgresql";
 import { WagerTransaction } from "../../../domain/entities/wager-transaction";
 import { Money } from "../../../domain/value-objects/money";
 import { WagerTransactionRepositoryPort } from "../../../application/ports/wager-transaction.repository";
@@ -89,7 +89,11 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     const entities = await em.find(
       WagerTransactionSchema,
       { status: WagerTransactionStatus.PendingReference },
-      { limit, orderBy: { createdAt: "ASC" } }
+      {
+        limit,
+        orderBy: { createdAt: "ASC" },
+        ...(tx ? { lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE } : {}),
+      }
     );
     return entities.map((e) => this.toDomain(e));
   }

@@ -10,7 +10,7 @@ export interface InboxMessageState {
   consumerName: string;
   payloadHash: string;
   receivedAt: Date;
-  processedAt?: Date;
+  processedAt?: Date | null;
 }
 
 export class InboxMessage {
@@ -37,7 +37,7 @@ export class InboxMessage {
       state.consumerName,
       state.payloadHash,
       state.receivedAt,
-      state.processedAt,
+      state.processedAt ?? undefined,
     );
   }
 
@@ -46,7 +46,7 @@ export class InboxMessage {
   }
 
   isProcessed(): boolean {
-    return this._processedAt !== undefined;
+    return this._processedAt != null;
   }
 
   markProcessed(at: Date = new Date()): void {
