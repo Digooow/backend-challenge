@@ -21,7 +21,7 @@ flowchart LR
 
 ### Camadas do Sistema
 - **Domain (`src/domain`):** Totalmente puro e livre de dependências de framework. Contém o Value Object imutável `Money` (`big.js`), os agregados e entidades (`Wallet`, `WalletLedgerEntry`, `WagerTransaction`, `OutboxMessage`, `InboxMessage`), eventos de domínio e `DomainException` categorizada (`VALIDATION`, `NOT_FOUND`, `CONFLICT`, `BUSINESS_RULE`, `TRANSIENT_INFRA`).
-- **Application (`src/application`):** Orquestra casos de uso transacionais (`ProcessWagerTransactionUseCase`, `CreateWalletUseCase`, `ReconcileWalletUseCase`, `GetWalletUseCase`, `GetWalletLedgerUseCase`, `GetWagerTransactionUseCase`) e define portas (`WalletRepositoryPort`, `WagerTransactionRepositoryPort`, `OutboxRepositoryPort`, `InboxRepositoryPort`, `UnitOfWorkPort`, `MessagePublisherPort`).
+- **Application (`src/application`):** Orquestra casos de uso transacionais (`ProcessWagerTransactionUseCase`, `CreateWalletUseCase`, `ReconcileWalletUseCase`) e define portas estritas (`WalletRepositoryPort`, `WagerTransactionRepositoryPort`, `OutboxRepositoryPort`, `InboxRepositoryPort`, `UnitOfWorkPort`, `MessagePublisherPort`, `MetricsPort`), sem nenhuma dependência de classes concretas de infraestrutura.
 - **Infrastructure (`src/infrastructure`):** Implementa persistência via **MikroORM v7** sobre PostgreSQL 15, migrations versionadas e reversíveis com constraints e triggers `append-only`, consumidor SQS FIFO (`WagerSqsConsumer`), publicador Outbox (`OutboxPublisher` / `OutboxRelayWorker`), reconciliador assíncrono (`PendingReferenceWorker`) e telemetria (`MetricsService`, `JsonLoggerService`, `RequestContext` com `AsyncLocalStorage`).
 - **Presentation (`src/presentation`):** Controllers REST (`WalletController`, `WagerController`, `HealthController`), validação rigorosa via `ValidationPipe` (`whitelist: true`, `forbidNonWhitelisted: true`), guard de identidade extensível (`ProviderAuthGuard`) e mapeamento semântico de status HTTP (`DomainExceptionFilter`).
 
@@ -124,12 +124,11 @@ No `WagerSqsConsumer`:
 
 ## 8. Referências Fora de Ordem (`PENDING_REFERENCE`) e Reconciliação
 
-### 8.1 Resolução Proativa + Reconciliação por Worker
+### 8.1 Reconciliação Assíncrona de `PENDING_REFERENCE`
 Quando um `REFUND` ou `ROLLBACK` chega antes da `BET` ou `WIN` referenciada:
 1. A transação é salva com status não-terminal `PENDING_REFERENCE` (HTTP `202 Accepted`) e emite `WagerTransactionPendingReference` (uma única vez) na Outbox.
-2. **Resolução Imediata (Proativa):** Assim que a `BET`/`WIN` referenciada chega e é processada na mesma transação, `reconcilePendingDependents` localiza e aplica imediatamente qualquer operação dependente que aguardava aquela referência.
-3. **Resolução via `PendingReferenceWorker`:** Concorrentemente, o job periódico varre transações `PENDING_REFERENCE` usando `FOR UPDATE SKIP LOCKED` com **backoff exponencial por transação** em memória.
-4. **Expiração por TTL:** Se a transação referenciada não surgir dentro da janela de TTL (60s), a operação transita para o estado terminal `REJECTED` com `FailureCode.ReferenceNotFound` e publica `WagerTransactionRejected`.
+2. **Resolução via `PendingReferenceWorker`:** O worker agendado varre transações `PENDING_REFERENCE` usando `FOR UPDATE SKIP LOCKED` com **backoff exponencial por transação**, reexecutando o `ProcessWagerTransactionUseCase` assim que a operação referenciada (`BET`/`WIN`) já estiver `PROCESSED`.
+3. **Expiração por TTL:** Se a transação referenciada não surgir dentro da janela de TTL (60s), a operação transita para o estado terminal `REJECTED` com `FailureCode.ReferenceNotFound` e publica `WagerTransactionRejected`.
 
 ### 8.2 Reconciliação Matemática O(1) (`POST /wallets/:walletId/reconciliation`)
 - O `ReconcileWalletUseCase` executa agregação SQL nativa (`SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END)`) sobre `wallet_ledger_entries` direto no PostgreSQL, evitando carregar milhares de registros em memória.

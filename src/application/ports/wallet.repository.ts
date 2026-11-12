@@ -17,3 +17,13 @@ export interface WalletRepositoryPort {
   findLedgerEntryByTransactionId?(walletId: string, transactionId: string, tx?: any): Promise<WalletLedgerEntry | null>;
   calculateLedgerSummary?(walletId: string, currency: string, tx?: any): Promise<LedgerSummaryResult>;
 }
+
+export function encodeLedgerCursor(entry: Pick<WalletLedgerEntry, "createdAt" | "id">): string {
+  return Buffer.from(
+    JSON.stringify({
+      createdAt: entry.createdAt.toISOString(),
+      id: entry.id,
+    }),
+    "utf8",
+  ).toString("base64url");
+}

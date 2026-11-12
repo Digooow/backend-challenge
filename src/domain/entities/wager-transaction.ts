@@ -227,6 +227,60 @@ export class WagerTransaction {
     return this.payloadHash === payloadHash;
   }
 
+  isValidBetReferenceForWin(refBet: WagerTransaction | null | undefined): refBet is WagerTransaction {
+    return Boolean(
+      refBet &&
+        refBet.kind === WagerTransactionKind.Bet &&
+        refBet.status === WagerTransactionStatus.Processed &&
+        refBet.playerId === this.playerId &&
+        refBet.walletId === this.walletId &&
+        refBet.roundId === this.roundId &&
+        refBet.money.currency === this.money.currency,
+    );
+  }
+
+  validateReversalReference(
+    refTx: WagerTransaction,
+    priorReversals: ReadonlyArray<WagerTransaction>,
+  ): FailureCode | null {
+    if (refTx.status !== WagerTransactionStatus.Processed) {
+      return FailureCode.InvalidReferenceKind;
+    }
+
+    const matchesContext =
+      refTx.playerId === this.playerId &&
+      refTx.walletId === this.walletId &&
+      refTx.money.currency === this.money.currency &&
+      refTx.roundId === this.roundId;
+
+    if (!matchesContext) {
+      return FailureCode.InvalidReferenceKind;
+    }
+
+    if (this.kind === WagerTransactionKind.Refund && refTx.kind !== WagerTransactionKind.Bet) {
+      return FailureCode.InvalidReferenceKind;
+    }
+
+    if (
+      this.kind === WagerTransactionKind.Rollback &&
+      refTx.kind !== WagerTransactionKind.Bet &&
+      refTx.kind !== WagerTransactionKind.Win &&
+      refTx.kind !== WagerTransactionKind.Refund
+    ) {
+      return FailureCode.InvalidReferenceKind;
+    }
+
+    if (!refTx.money.equals(this.money)) {
+      return FailureCode.InvalidAmount;
+    }
+
+    if (priorReversals.some((r) => r.id !== this.id)) {
+      return FailureCode.ReferenceAlreadyReverted;
+    }
+
+    return null;
+  }
+
   ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
     switch (this.kind) {
       case WagerTransactionKind.Opening:
@@ -237,13 +291,18 @@ export class WagerTransaction {
         return LedgerDirection.Debit;
       case WagerTransactionKind.Rollback:
         if (!reference) {
-          throw new DomainException("ROLLBACK exige a transação de referência para determinar a direção no ledger.");
+          throw DomainException.validation(
+            "ROLLBACK exige a transação de referência para determinar a direção no ledger.",
+            FailureCode.InvalidReferenceKind,
+          );
         }
         return reference.kind === WagerTransactionKind.Bet
           ? LedgerDirection.Credit
           : LedgerDirection.Debit;
       default:
-        throw new DomainException(`A operação ${this.kind} não gera lançamento no ledger.`);
+        throw DomainException.businessRule(
+          `A operação ${this.kind} não gera lançamento no ledger.`,
+        );
     }
   }
 

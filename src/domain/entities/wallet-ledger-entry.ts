@@ -52,8 +52,8 @@ export class WalletLedgerEntry {
     );
 
     if (!entry.isBalanced()) {
-      throw new DomainException(
-        `Aritmética do ledger inconsistente: ${props.balanceBefore.toString()} ${props.direction === LedgerDirection.Credit ? '+' : '-'} ${props.money.toString()} !== ${props.balanceAfter.toString()}`
+      throw DomainException.validation(
+        `Aritmética do ledger inconsistente: ${props.balanceBefore.toString()} ${props.direction === LedgerDirection.Credit ? "+" : "-"} ${props.money.toString()} !== ${props.balanceAfter.toString()}`,
       );
     }
 

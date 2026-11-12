@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { MetricsPort } from "../../application/ports/metrics.port";
 
 export interface SystemMetrics {
   transactionsByStatus: Record<string, number>;
@@ -16,7 +17,7 @@ export interface SystemMetrics {
 }
 
 @Injectable()
-export class MetricsService {
+export class MetricsService implements MetricsPort {
   private readonly transactionsByStatus: Record<string, number> = {
     PROCESSED: 0,
     REJECTED: 0,

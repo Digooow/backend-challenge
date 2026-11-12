@@ -1,22 +1,23 @@
-import { createHash } from 'node:crypto';
-import { DomainException } from '../../domain/exceptions/domain.exception';
-import { Money } from '../../domain/value-objects/money';
-import { WagerTransaction } from '../../domain/entities/wager-transaction';
-import { WagerTransactionKind } from '../../domain/enums/wager-transaction-kind';
-import { WagerTransactionStatus } from '../../domain/enums/wager-transaction-status';
-import { FailureCode } from '../../domain/enums/failure-code';
-import { OutboxMessage } from '../../domain/entities/outbox-message';
-import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed.event';
-import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed.event';
-import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected.event';
-import { WagerTransactionPendingReference } from '../../domain/events/wager-transaction-pending-reference.event';
-import { WalletRepositoryPort } from '../ports/wallet.repository';
-import { WagerTransactionRepositoryPort } from '../ports/wager-transaction.repository';
-import { OutboxRepositoryPort } from '../ports/outbox.repository';
-import { UnitOfWorkPort } from '../ports/unit-of-work.port';
-import { ProcessWagerInputDto, ProcessWagerOutputDto } from '../dtos/process-wager.dto';
-import { MetricsService } from '../../infrastructure/observability/metrics.service';
-import { Wallet } from '../../domain/entities/wallet';
+import { createHash } from "node:crypto";
+import { DomainException } from "../../domain/exceptions/domain.exception";
+import { Money } from "../../domain/value-objects/money";
+import { WagerTransaction } from "../../domain/entities/wager-transaction";
+import { WagerTransactionKind } from "../../domain/enums/wager-transaction-kind";
+import { WagerTransactionStatus } from "../../domain/enums/wager-transaction-status";
+import { FailureCode } from "../../domain/enums/failure-code";
+import { LedgerDirection } from "../../domain/enums/ledger-direction";
+import { OutboxMessage } from "../../domain/entities/outbox-message";
+import { WalletBalanceChanged } from "../../domain/events/wallet-balance-changed.event";
+import { WagerTransactionProcessed } from "../../domain/events/wager-transaction-processed.event";
+import { WagerTransactionRejected } from "../../domain/events/wager-transaction-rejected.event";
+import { WagerTransactionPendingReference } from "../../domain/events/wager-transaction-pending-reference.event";
+import { WalletRepositoryPort } from "../ports/wallet.repository";
+import { WagerTransactionRepositoryPort } from "../ports/wager-transaction.repository";
+import { OutboxRepositoryPort } from "../ports/outbox.repository";
+import { UnitOfWorkPort } from "../ports/unit-of-work.port";
+import { MetricsPort } from "../ports/metrics.port";
+import { ProcessWagerInputDto, ProcessWagerOutputDto } from "../dtos/process-wager.dto";
+import { Wallet } from "../../domain/entities/wallet";
 
 export class ProcessWagerTransactionUseCase {
   constructor(
@@ -24,12 +25,13 @@ export class ProcessWagerTransactionUseCase {
     private readonly wagerTxRepo: WagerTransactionRepositoryPort,
     private readonly outboxRepo: OutboxRepositoryPort,
     private readonly uow: UnitOfWorkPort,
-    private readonly metricsService?: MetricsService,
+    private readonly metricsService?: MetricsPort,
   ) {}
 
   async execute(input: ProcessWagerInputDto, externalTx?: unknown): Promise<ProcessWagerOutputDto> {
     const startTime = performance.now();
-    const idempotencyKey = input.idempotencyKey ?? `${input.providerId}:${input.externalTransactionId}`;
+    const idempotencyKey =
+      input.idempotencyKey ?? `${input.providerId}:${input.externalTransactionId}`;
     const payloadHash = this.calculatePayloadHash(input);
     const correlationId = input.correlationId ?? crypto.randomUUID();
     const operationMoney = Money.from(input.money);
@@ -39,23 +41,26 @@ export class ProcessWagerTransactionUseCase {
       const preExistingTx = await this.wagerTxRepo.findByIdempotencyKey(idempotencyKey, tx);
       if (preExistingTx && !preExistingTx.matchesPayload(payloadHash)) {
         throw DomainException.conflict(
-          'Payload conflitante para a mesma Idempotency Key.',
-          'PAYLOAD_MISMATCH',
+          "Payload conflitante para a mesma Idempotency Key.",
+          FailureCode.PayloadMismatch,
         );
       }
 
       // 2. Lock Pessimista na carteira ANTES de decidir estado ou criar transação.
-      // Isso serializa requisições concorrentes com a mesma Idempotency-Key ou para a mesma carteira.
+      // Serializa requisições concorrentes com a mesma Idempotency-Key ou para a mesma carteira.
       const wallet = await this.walletRepo.findByIdForUpdate(input.walletId, tx);
 
       if (!wallet) {
-        throw DomainException.notFound(`Carteira ${input.walletId} não encontrada.`, 'WALLET_NOT_FOUND');
+        throw DomainException.notFound(
+          `Carteira ${input.walletId} não encontrada.`,
+          "WALLET_NOT_FOUND",
+        );
       }
 
       if (wallet.playerId !== input.playerId) {
         throw DomainException.validation(
           `Carteira ${input.walletId} não pertence ao jogador ${input.playerId}.`,
-          'WALLET_PLAYER_MISMATCH',
+          "WALLET_PLAYER_MISMATCH",
         );
       }
 
@@ -72,8 +77,8 @@ export class ProcessWagerTransactionUseCase {
       if (existingTx) {
         if (!existingTx.matchesPayload(payloadHash)) {
           throw DomainException.conflict(
-            'Payload conflitante para a mesma Idempotency Key.',
-            'PAYLOAD_MISMATCH',
+            "Payload conflitante para a mesma Idempotency Key.",
+            FailureCode.PayloadMismatch,
           );
         }
 
@@ -105,53 +110,32 @@ export class ProcessWagerTransactionUseCase {
 
       // Validação de moeda
       if (wallet.currency !== operationMoney.currency) {
-        wagerTx.reject(FailureCode.InvalidCurrency);
-        await this.wagerTxRepo.save(wagerTx, tx);
-        await this.outboxRepo.save(
-          OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-          tx,
-        );
-        this.metricsService?.incrementTransaction(wagerTx.status);
-        return {
-          transactionId: wagerTx.id,
-          status: wagerTx.status,
-          balance: wallet.balance.toJSON(),
-          idempotentReplay: false,
-          failureCode: wagerTx.failureCode,
-        };
+        await this.rejectTransaction(wagerTx, FailureCode.InvalidCurrency, correlationId, tx);
+        return this.buildProcessedOutput(wagerTx, wallet);
       }
 
-      // 4. Processamento por tipo de operação
+      // 4. Processamento por tipo de operação delegando invariantes ao Domínio (Tell, Don't Ask)
       switch (input.kind) {
         case WagerTransactionKind.Bet: {
-          try {
-            const { ledgerEntry } = wallet.debit(operationMoney, wagerTx.id);
-            await this.walletRepo.save(wallet, tx);
-            await this.walletRepo.saveLedgerEntry(ledgerEntry, tx);
-
-            wagerTx.markProcessed(undefined);
-            await this.wagerTxRepo.save(wagerTx, tx);
-
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, ledgerEntry, { correlationId })),
+          if (!wallet.canCover(operationMoney)) {
+            await this.rejectTransaction(
+              wagerTx,
+              FailureCode.InsufficientBalance,
+              correlationId,
               tx,
             );
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionProcessed.from(wagerTx, { correlationId })),
-              tx,
-            );
-          } catch (err: unknown) {
-            if (err instanceof DomainException && err.message.includes('Saldo insuficiente')) {
-              wagerTx.reject(FailureCode.InsufficientBalance);
-              await this.wagerTxRepo.save(wagerTx, tx);
-              await this.outboxRepo.save(
-                OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-                tx,
-              );
-            } else {
-              throw err;
-            }
+            break;
           }
+
+          const { ledgerEntry } = wallet.debit(operationMoney, wagerTx.id);
+          await this.applyProcessedBalanceChange(
+            wallet,
+            wagerTx,
+            ledgerEntry,
+            undefined,
+            correlationId,
+            tx,
+          );
           break;
         }
 
@@ -163,20 +147,12 @@ export class ProcessWagerTransactionUseCase {
               input.referenceExternalTransactionId,
               tx,
             );
-            const validBetRef =
-              refBet &&
-              refBet.kind === WagerTransactionKind.Bet &&
-              refBet.status === WagerTransactionStatus.Processed &&
-              refBet.playerId === input.playerId &&
-              refBet.walletId === input.walletId &&
-              refBet.roundId === input.roundId &&
-              refBet.money.currency === operationMoney.currency;
 
-            if (!validBetRef) {
-              wagerTx.reject(FailureCode.InvalidReferenceKind);
-              await this.wagerTxRepo.save(wagerTx, tx);
-              await this.outboxRepo.save(
-                OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
+            if (!wagerTx.isValidBetReferenceForWin(refBet)) {
+              await this.rejectTransaction(
+                wagerTx,
+                FailureCode.InvalidReferenceKind,
+                correlationId,
                 tx,
               );
               break;
@@ -185,18 +161,12 @@ export class ProcessWagerTransactionUseCase {
           }
 
           const { ledgerEntry } = wallet.credit(operationMoney, wagerTx.id);
-          await this.walletRepo.save(wallet, tx);
-          await this.walletRepo.saveLedgerEntry(ledgerEntry, tx);
-
-          wagerTx.markProcessed(refTxId);
-          await this.wagerTxRepo.save(wagerTx, tx);
-
-          await this.outboxRepo.save(
-            OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, ledgerEntry, { correlationId })),
-            tx,
-          );
-          await this.outboxRepo.save(
-            OutboxMessage.enqueue(WagerTransactionProcessed.from(wagerTx, { correlationId })),
+          await this.applyProcessedBalanceChange(
+            wallet,
+            wagerTx,
+            ledgerEntry,
+            refTxId,
+            correlationId,
             tx,
           );
           break;
@@ -229,10 +199,10 @@ export class ProcessWagerTransactionUseCase {
             const isTtlExpired = now.getTime() - wagerTx.createdAt.getTime() > 60000;
 
             if (isTtlExpired && existingTx) {
-              wagerTx.reject(FailureCode.ReferenceNotFound);
-              await this.wagerTxRepo.save(wagerTx, tx);
-              await this.outboxRepo.save(
-                OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
+              await this.rejectTransaction(
+                wagerTx,
+                FailureCode.ReferenceNotFound,
+                correlationId,
                 tx,
               );
             } else {
@@ -250,125 +220,45 @@ export class ProcessWagerTransactionUseCase {
             break;
           }
 
-          if (refTx.status !== WagerTransactionStatus.Processed) {
-            wagerTx.reject(FailureCode.InvalidReferenceKind);
-            await this.wagerTxRepo.save(wagerTx, tx);
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-              tx,
-            );
-            break;
-          }
-
-          // Regra 2: Mesma rodada, player, wallet e moeda
-          const matchesContext =
-            refTx.playerId === input.playerId &&
-            refTx.walletId === input.walletId &&
-            refTx.money.currency === operationMoney.currency &&
-            refTx.roundId === input.roundId;
-
-          if (!matchesContext) {
-            wagerTx.reject(FailureCode.InvalidReferenceKind);
-            await this.wagerTxRepo.save(wagerTx, tx);
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-              tx,
-            );
-            break;
-          }
-
-          // Regra 3: REFUND só referencia BET. ROLLBACK referencia BET, WIN ou REFUND.
-          if (
-            input.kind === WagerTransactionKind.Refund &&
-            refTx.kind !== WagerTransactionKind.Bet
-          ) {
-            wagerTx.reject(FailureCode.InvalidReferenceKind);
-            await this.wagerTxRepo.save(wagerTx, tx);
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-              tx,
-            );
-            break;
-          }
-
-          if (
-            input.kind === WagerTransactionKind.Rollback &&
-            refTx.kind !== WagerTransactionKind.Bet &&
-            refTx.kind !== WagerTransactionKind.Win &&
-            refTx.kind !== WagerTransactionKind.Refund
-          ) {
-            wagerTx.reject(FailureCode.InvalidReferenceKind);
-            await this.wagerTxRepo.save(wagerTx, tx);
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-              tx,
-            );
-            break;
-          }
-
-          // Regra 5: O valor deve ser idêntico ao da referência
-          if (!refTx.money.equals(operationMoney)) {
-            wagerTx.reject(FailureCode.InvalidAmount);
-            await this.wagerTxRepo.save(wagerTx, tx);
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-              tx,
-            );
-            break;
-          }
-
-          // Regra 4: Uma referência não pode ser revertida duas vezes pelo mesmo tipo de operação
           const priorReversals = await this.wagerTxRepo.findReversals(
             input.providerId,
             input.referenceExternalTransactionId!,
             input.kind,
             tx,
           );
-          const alreadyReverted = priorReversals.some((r) => r.id !== wagerTx.id);
-          if (alreadyReverted) {
-            wagerTx.reject(FailureCode.ReferenceAlreadyReverted);
-            await this.wagerTxRepo.save(wagerTx, tx);
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
+
+          const validationFailure = wagerTx.validateReversalReference(refTx, priorReversals);
+          if (validationFailure !== null) {
+            await this.rejectTransaction(wagerTx, validationFailure, correlationId, tx);
+            break;
+          }
+
+          const direction = wagerTx.ledgerDirectionFor(refTx);
+
+          // Regra 9: Reversão que produziria saldo negativo é rejeitada explicitamente com NEGATIVE_BALANCE_PRODUCED
+          if (direction === LedgerDirection.Debit && !wallet.canCover(operationMoney)) {
+            await this.rejectTransaction(
+              wagerTx,
+              FailureCode.NegativeBalanceProduced,
+              correlationId,
               tx,
             );
             break;
           }
 
-          const isDebitReversal = refTx.kind === WagerTransactionKind.Bet;
-
-          try {
-            const { ledgerEntry } = isDebitReversal
+          const { ledgerEntry } =
+            direction === LedgerDirection.Credit
               ? wallet.credit(operationMoney, wagerTx.id)
               : wallet.debit(operationMoney, wagerTx.id);
 
-            await this.walletRepo.save(wallet, tx);
-            await this.walletRepo.saveLedgerEntry(ledgerEntry, tx);
-
-            wagerTx.markProcessed(refTx.id);
-            await this.wagerTxRepo.save(wagerTx, tx);
-
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, ledgerEntry, { correlationId })),
-              tx,
-            );
-            await this.outboxRepo.save(
-              OutboxMessage.enqueue(WagerTransactionProcessed.from(wagerTx, { correlationId })),
-              tx,
-            );
-          } catch (err: unknown) {
-            // Regra 9: Reversão que produziria saldo negativo é rejeitada com NEGATIVE_BALANCE_PRODUCED
-            if (err instanceof DomainException && err.message.includes('Saldo insuficiente')) {
-              wagerTx.reject(FailureCode.NegativeBalanceProduced);
-              await this.wagerTxRepo.save(wagerTx, tx);
-              await this.outboxRepo.save(
-                OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
-                tx,
-              );
-            } else {
-              throw err;
-            }
-          }
+          await this.applyProcessedBalanceChange(
+            wallet,
+            wagerTx,
+            ledgerEntry,
+            refTx.id,
+            correlationId,
+            tx,
+          );
           break;
         }
 
@@ -376,15 +266,7 @@ export class ProcessWagerTransactionUseCase {
           throw DomainException.validation(`Operação inválida: ${String(input.kind)}`);
       }
 
-      this.metricsService?.incrementTransaction(wagerTx.status);
-
-      return {
-        transactionId: wagerTx.id,
-        status: wagerTx.status,
-        balance: wallet.balance.toJSON(),
-        idempotentReplay: false,
-        failureCode: wagerTx.failureCode,
-      };
+      return this.buildProcessedOutput(wagerTx, wallet);
     };
 
     try {
@@ -397,9 +279,9 @@ export class ProcessWagerTransactionUseCase {
       // Fallback de segurança caso duas transações com a mesma Idempotency-Key em carteiras distintas
       // colidam na constraint UNIQUE do banco de dados
       const isUniqueViolation =
-        error?.code === '23505' ||
-        error?.name === 'UniqueConstraintViolationException' ||
-        (typeof error?.message === 'string' && error.message.includes('unique constraint'));
+        error?.code === "23505" ||
+        error?.name === "UniqueConstraintViolationException" ||
+        (typeof error?.message === "string" && error.message.includes("unique constraint"));
 
       if (isUniqueViolation && !externalTx) {
         this.metricsService?.incrementLockConflict();
@@ -407,8 +289,8 @@ export class ProcessWagerTransactionUseCase {
         if (committedTx) {
           if (!committedTx.matchesPayload(payloadHash)) {
             throw DomainException.conflict(
-              'Payload conflitante para a mesma Idempotency Key.',
-              'PAYLOAD_MISMATCH',
+              "Payload conflitante para a mesma Idempotency Key.",
+              FailureCode.PayloadMismatch,
             );
           }
           const wallet = await this.walletRepo.findById(committedTx.walletId);
@@ -418,11 +300,60 @@ export class ProcessWagerTransactionUseCase {
         }
       }
 
-      if (error?.code === '40P01' || error?.code === '55P03') {
+      if (error?.code === "40P01" || error?.code === "55P03") {
         this.metricsService?.incrementLockConflict();
       }
       throw error;
     }
+  }
+
+  private async rejectTransaction(
+    wagerTx: WagerTransaction,
+    code: FailureCode,
+    correlationId: string,
+    tx: unknown,
+  ): Promise<void> {
+    wagerTx.reject(code);
+    await this.wagerTxRepo.save(wagerTx, tx);
+    await this.outboxRepo.save(
+      OutboxMessage.enqueue(WagerTransactionRejected.from(wagerTx, { correlationId })),
+      tx,
+    );
+  }
+
+  private async applyProcessedBalanceChange(
+    wallet: Wallet,
+    wagerTx: WagerTransaction,
+    ledgerEntry: Parameters<WalletRepositoryPort["saveLedgerEntry"]>[0],
+    referenceTransactionId: string | undefined,
+    correlationId: string,
+    tx: unknown,
+  ): Promise<void> {
+    await this.walletRepo.save(wallet, tx);
+    await this.walletRepo.saveLedgerEntry(ledgerEntry, tx);
+
+    wagerTx.markProcessed(referenceTransactionId);
+    await this.wagerTxRepo.save(wagerTx, tx);
+
+    await this.outboxRepo.save(
+      OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, ledgerEntry, { correlationId })),
+      tx,
+    );
+    await this.outboxRepo.save(
+      OutboxMessage.enqueue(WagerTransactionProcessed.from(wagerTx, { correlationId })),
+      tx,
+    );
+  }
+
+  private buildProcessedOutput(wagerTx: WagerTransaction, wallet: Wallet): ProcessWagerOutputDto {
+    this.metricsService?.incrementTransaction(wagerTx.status);
+    return {
+      transactionId: wagerTx.id,
+      status: wagerTx.status,
+      balance: wallet.balance.toJSON(),
+      idempotentReplay: false,
+      failureCode: wagerTx.failureCode,
+    };
   }
 
   private async buildReplayResponse(
@@ -486,6 +417,6 @@ export class ProcessWagerTransactionUseCase {
       walletId: input.walletId,
     };
 
-    return createHash('sha256').update(JSON.stringify(canonicalObject)).digest('hex');
+    return createHash("sha256").update(JSON.stringify(canonicalObject)).digest("hex");
   }
 }

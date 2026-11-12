@@ -58,21 +58,7 @@ export class DomainExceptionFilter implements ExceptionFilter {
           break;
         case "BUSINESS_RULE":
         default:
-          if (exception.message.includes("não encontrada")) {
-            status = HttpStatus.NOT_FOUND;
-          } else if (
-            exception.message.includes("conflitante") ||
-            exception.message.includes("Já existe")
-          ) {
-            status = HttpStatus.CONFLICT;
-          } else if (
-            exception.message.includes("inválid") ||
-            exception.message.includes("exig") ||
-            exception.message.includes("negativo") ||
-            exception.message.includes("string")
-          ) {
-            status = HttpStatus.BAD_REQUEST;
-          }
+          status = HttpStatus.UNPROCESSABLE_ENTITY;
           break;
       }
 

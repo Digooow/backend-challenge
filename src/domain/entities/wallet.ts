@@ -1,4 +1,5 @@
 import { DomainException } from "../exceptions/domain.exception";
+import { FailureCode } from "../enums/failure-code";
 import { Money } from "../value-objects/money";
 import { LedgerDirection, WalletLedgerEntry } from "./wallet-ledger-entry";
 import { WagerTransaction } from "./wager-transaction";
@@ -44,7 +45,10 @@ export class Wallet {
     const currency = props.initialBalance.currency;
 
     if (props.initialBalance.isNegative()) {
-      throw new DomainException("Saldo inicial da carteira não pode ser negativo.");
+      throw DomainException.validation(
+        "Saldo inicial da carteira não pode ser negativo.",
+        FailureCode.InvalidAmount,
+      );
     }
 
     const wallet = new Wallet(
@@ -112,15 +116,26 @@ export class Wallet {
     return this._updatedAt;
   }
 
+  canCover(amount: Money): boolean {
+    this.assertSameCurrency(amount);
+    return !this._balance.isLessThan(amount);
+  }
+
   debit(amount: Money, transactionId: string, ledgerEntryId?: string): WalletOperationResult {
     this.assertSameCurrency(amount);
 
     if (amount.isNegative() || amount.isZero()) {
-      throw new DomainException("O valor do débito deve ser estritamente positivo.");
+      throw DomainException.validation(
+        "O valor do débito deve ser estritamente positivo.",
+        FailureCode.InvalidAmount,
+      );
     }
 
-    if (this._balance.isLessThan(amount)) {
-      throw new DomainException("Saldo insuficiente para realizar a operação.");
+    if (!this.canCover(amount)) {
+      throw DomainException.businessRule(
+        "Saldo insuficiente para realizar a operação.",
+        FailureCode.InsufficientBalance,
+      );
     }
 
     const balanceBefore = this._balance;
@@ -148,7 +163,10 @@ export class Wallet {
     this.assertSameCurrency(amount);
 
     if (amount.isNegative() || amount.isZero()) {
-      throw new DomainException("O valor do crédito deve ser estritamente positivo.");
+      throw DomainException.validation(
+        "O valor do crédito deve ser estritamente positivo.",
+        FailureCode.InvalidAmount,
+      );
     }
 
     const balanceBefore = this._balance;
@@ -174,7 +192,11 @@ export class Wallet {
 
   private assertSameCurrency(money: Money): void {
     if (this.currency !== money.currency) {
-      throw new DomainException(`Operação rejeitada: moeda ${money.currency} incompatível com a carteira ${this.currency}.`);
+      throw DomainException.businessRule(
+        `Operação rejeitada: moeda ${money.currency} incompatível com a carteira ${this.currency}.`,
+        FailureCode.InvalidCurrency,
+      );
     }
   }
 }
+

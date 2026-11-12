@@ -13,11 +13,10 @@ import {
   Inject,
   UseGuards,
 } from "@nestjs/common";
-import { WalletRepositoryPort } from "../../application/ports/wallet.repository";
+import { WalletRepositoryPort, encodeLedgerCursor } from "../../application/ports/wallet.repository";
 import { CreateWalletUseCase } from "../../application/use-cases/create-wallet.use-case";
 import { ReconcileWalletUseCase } from "../../application/use-cases/reconcile-wallet.use-case";
 import { CreateWalletRequestDto } from "../../application/dtos/create-wallet.dto";
-import { MikroOrmWalletRepository } from "../../infrastructure/database/repositories/mikro-orm-wallet.repository";
 import { ProviderAuthGuard } from "../guards/provider-auth.guard";
 import { DomainException } from "../../domain/exceptions/domain.exception";
 
@@ -39,10 +38,7 @@ export class WalletController {
         initialBalance: body.initialBalance,
       });
     } catch (error) {
-      if (
-        error instanceof DomainException &&
-        (error.category === "CONFLICT" || error.message.includes("Já existe"))
-      ) {
+      if (error instanceof DomainException && error.category === "CONFLICT") {
         throw new ConflictException(error.message);
       }
       throw error;
@@ -97,7 +93,7 @@ export class WalletController {
         balanceAfter: entry.balanceAfter.toJSON(),
         createdAt: entry.createdAt.toISOString(),
       })),
-      nextCursor: lastEntry ? MikroOrmWalletRepository.encodeLedgerCursor(lastEntry) : null,
+      nextCursor: lastEntry ? encodeLedgerCursor(lastEntry) : null,
     };
   }
 

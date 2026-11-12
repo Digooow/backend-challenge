@@ -1,9 +1,8 @@
-import { Logger } from "@nestjs/common";
 import { DomainException } from "../../domain/exceptions/domain.exception";
 import { Money, MoneyProps } from "../../domain/value-objects/money";
 import { LedgerDirection } from "../../domain/enums/ledger-direction";
 import { WalletRepositoryPort } from "../ports/wallet.repository";
-import { MetricsService } from "../../infrastructure/observability/metrics.service";
+import { MetricsPort } from "../ports/metrics.port";
 
 export interface ReconcileWalletOutputDto {
   walletId: string;
@@ -14,12 +13,15 @@ export interface ReconcileWalletOutputDto {
   checkedEntries: number;
 }
 
-export class ReconcileWalletUseCase {
-  private readonly logger = new Logger(ReconcileWalletUseCase.name);
+export interface ReconciliationLoggerPort {
+  error(message: Record<string, unknown> | string): void;
+}
 
+export class ReconcileWalletUseCase {
   constructor(
     private readonly walletRepo: WalletRepositoryPort,
-    private readonly metricsService?: MetricsService,
+    private readonly metricsService?: MetricsPort,
+    private readonly logger?: ReconciliationLoggerPort,
   ) {}
 
   async execute(walletId: string): Promise<ReconcileWalletOutputDto> {
@@ -55,14 +57,22 @@ export class ReconcileWalletUseCase {
 
     if (!consistent) {
       this.metricsService?.incrementReconciliationDiscrepancy();
-      this.logger.error({
+      const discrepancyPayload = {
+        level: "ERROR",
+        timestamp: new Date().toISOString(),
+        context: ReconcileWalletUseCase.name,
         message: "Divergência detectada na reconciliação de carteira",
         walletId: wallet.id,
         storedBalance: wallet.balance.toString(),
         calculatedBalance: calculated.toString(),
         difference: difference.toString(),
         checkedEntries,
-      });
+      };
+      if (this.logger) {
+        this.logger.error(discrepancyPayload);
+      } else {
+        process.stderr.write(`${JSON.stringify(discrepancyPayload)}\n`);
+      }
     }
 
     return {

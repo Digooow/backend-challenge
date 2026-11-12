@@ -99,7 +99,10 @@ export class Money {
 
   private assertSameCurrency(other: Money): void {
     if (this.currency !== other.currency) {
-      throw new DomainException(`Moedas incompatíveis: ${this.currency} e ${other.currency}`);
+      throw DomainException.businessRule(
+        `Moedas incompatíveis: ${this.currency} e ${other.currency}`,
+        "INVALID_CURRENCY",
+      );
     }
   }
 }

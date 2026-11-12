@@ -94,11 +94,8 @@ export class WagerController {
 
           return result;
         } catch (error: any) {
-          if (
-            error instanceof DomainException &&
-            (error.category === "CONFLICT" || error.message.includes("Payload conflitante"))
-          ) {
-            throw new ConflictException("Payload conflitante para a mesma Idempotency Key.");
+          if (error instanceof DomainException && error.category === "CONFLICT") {
+            throw new ConflictException(error.message);
           }
           throw error;
         }
