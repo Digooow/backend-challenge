@@ -20,7 +20,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  logger.log(`Jungle Gaming backend running on port ${port}`, 'Bootstrap');
+  logger.log(`Distributed Wagering Processor running on port ${port}`, 'Bootstrap');
 }
 
 bootstrap();

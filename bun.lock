@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "jungle-gaming-challenge",
+      "name": "distributed-wagering-processor",
       "dependencies": {
         "@aws-sdk/client-sqs": "^3.1160.0",
         "@mikro-orm/core": "^7.2.5",

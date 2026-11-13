@@ -9,7 +9,7 @@ interface LoadTestOptions {
 
 async function runLoadTest(options: LoadTestOptions) {
   console.log("=================================================");
-  console.log("       JUNGLE GAMING - LOAD TEST EXPERIMENT      ");
+  console.log("   DISTRIBUTED WAGERING PROCESSOR - LOAD TEST    ");
   console.log("=================================================");
   console.log(`Target URL:           ${options.baseUrl}`);
   console.log(`Distinct Requests:    ${options.totalRequests}`);
