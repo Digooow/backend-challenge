@@ -16,12 +16,17 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/src/infrastructure/database/migrations ./src/infrastructure/database/migrations
-COPY --from=builder /app/src/infrastructure/database/mikro-orm.config.ts ./src/infrastructure/database/mikro-orm.config.ts
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY --from=builder --chown=appuser:appgroup /app/package.json ./package.json
+COPY --from=builder --chown=appuser:appgroup /app/node_modules ./node_modules
+COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
+
+USER appuser
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "bun run src/infrastructure/database/run-migrations.ts up && bun run dist/infrastructure/nest/main.js"]
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+  CMD ["bun", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+
+CMD ["sh", "-c", "bun run dist/infrastructure/database/run-migrations.js up && bun run dist/infrastructure/nest/main.js"]

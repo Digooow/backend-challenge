@@ -4,6 +4,7 @@
   "sourceRoot": "src",
   "entryFile": "infrastructure/nest/main",
   "compilerOptions": {
-    "tsConfigPath": "tsconfig.build.json"
+    "tsConfigPath": "tsconfig.build.json",
+    "deleteOutDir": true
   }
 }

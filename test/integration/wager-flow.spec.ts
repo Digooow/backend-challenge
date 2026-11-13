@@ -3,6 +3,7 @@ import { setupTestDb, teardownTestDb } from "../setup/setup-test-db";
 import { ProcessWagerTransactionUseCase } from "../../src/application/use-cases/process-wager-transaction.use-case";
 import { ReconcileWalletUseCase } from "../../src/application/use-cases/reconcile-wallet.use-case";
 import { MikroOrmWalletRepository } from "../../src/infrastructure/database/repositories/mikro-orm-wallet.repository";
+import { encodeLedgerCursor } from "../../src/application/ports/wallet.repository";
 import { MikroOrmWagerTransactionRepository } from "../../src/infrastructure/database/repositories/mikro-orm-wager-transaction.repository";
 import { MikroOrmOutboxRepository } from "../../src/infrastructure/database/repositories/mikro-orm-outbox.repository";
 import { MikroOrmInboxRepository } from "../../src/infrastructure/database/repositories/mikro-orm-inbox.repository";
@@ -79,16 +80,19 @@ describe("Wager Processing End-to-End Flow & Inbox/Outbox Integration", () => {
     expect(eventTypes).toContain("WalletBalanceChanged");
     expect(eventTypes).toContain("WagerTransactionProcessed");
 
-    // Verificar paginação keyset com cursor opaco
-    const page1 = await checkWalletRepo.getLedgerEntriesPaginated(walletId, 1);
-    expect(page1.toHaveLength(2)).toBe(true); // 1 + 1 para detecção de nextCursor
-    const nextCursor = MikroOrmWalletRepository.encodeLedgerCursor({
-      createdAt: page1[0].createdAt,
-      id: page1[0].id,
-    });
-    const page2 = await checkWalletRepo.getLedgerEntriesPaginated(walletId, 1, nextCursor);
+    // Verificar paginação keyset com cursor opaco (OPENING + BET = 2 entradas)
+    const page1 = await checkWalletRepo.getLedgerEntries(walletId, 1);
+    expect(page1).toHaveLength(1);
+    const nextCursor = encodeLedgerCursor(page1[0]);
+    const page2 = await checkWalletRepo.getLedgerEntries(walletId, 1, nextCursor);
     expect(page2).toHaveLength(1);
     expect(page2[0].id).not.toBe(page1[0].id);
+    const page3 = await checkWalletRepo.getLedgerEntries(
+      walletId,
+      1,
+      encodeLedgerCursor(page2[0]),
+    );
+    expect(page3).toHaveLength(0);
 
     // Reconciliação nativa SQL O(1)
     const recon = await reconcileUseCase.execute(walletId);

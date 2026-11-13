@@ -4,6 +4,7 @@ import { OutboxMessage } from "../../../src/domain/entities/outbox-message";
 import { WagerSqsConsumer } from "../../../src/infrastructure/messaging/sqs/wager-sqs.consumer";
 import { PendingReferenceWorker } from "../../../src/infrastructure/jobs/pending-reference.worker";
 import { MikroOrmWalletRepository } from "../../../src/infrastructure/database/repositories/mikro-orm-wallet.repository";
+import { encodeLedgerCursor } from "../../../src/application/ports/wallet.repository";
 import { DomainExceptionFilter } from "../../../src/presentation/filters/domain-exception.filter";
 import { DomainException } from "../../../src/domain/exceptions/domain.exception";
 import { FailureCode } from "../../../src/domain/enums/failure-code";
@@ -36,14 +37,13 @@ describe("Infrastructure, Messaging, Workers & Presentation (Unit)", () => {
     it("should normalize null publishedAt/nextAttemptAt in OutboxMessage and enforce max attempts", () => {
       const msg = OutboxMessage.rehydrate({
         id: "outbox-1",
-        aggregateType: "WagerTransaction",
         aggregateId: "tx-1",
         eventType: "WagerTransactionProcessed",
         payload: { eventId: "outbox-1" },
         attempts: 0,
         nextAttemptAt: null,
         publishedAt: null,
-        createdAt: new Date(),
+        occurredAt: new Date(),
       });
 
       expect(msg.isPending()).toBe(true);
@@ -356,11 +356,15 @@ describe("Infrastructure, Messaging, Workers & Presentation (Unit)", () => {
       const date = new Date("2026-10-29T18:00:00.000Z");
       const id = "550e8400-e29b-41d4-a716-446655440000";
 
-      const cursor = MikroOrmWalletRepository.encodeLedgerCursor({ createdAt: date, id });
-      const decoded = MikroOrmWalletRepository.decodeLedgerCursor(cursor);
+      const portCursor = encodeLedgerCursor({ createdAt: date, id });
+      const repoCursor = MikroOrmWalletRepository.encodeLedgerCursor({ createdAt: date, id });
+      const decodedPort = MikroOrmWalletRepository.decodeLedgerCursor(portCursor);
+      const decodedRepo = MikroOrmWalletRepository.decodeLedgerCursor(repoCursor);
 
-      expect(decoded.createdAt.toISOString()).toBe(date.toISOString());
-      expect(decoded.id).toBe(id);
+      expect(decodedPort.createdAt.toISOString()).toBe(date.toISOString());
+      expect(decodedPort.id).toBe(id);
+      expect(decodedRepo.createdAt.toISOString()).toBe(date.toISOString());
+      expect(decodedRepo.id).toBe(id);
 
       expect(() => MikroOrmWalletRepository.decodeLedgerCursor("not-valid-base64-json")).toThrow(
         DomainException,
@@ -433,7 +437,7 @@ describe("Infrastructure, Messaging, Workers & Presentation (Unit)", () => {
         findById: mock(async () => wallet),
         calculateLedgerSummary: mock(async () => ({
           calculatedBalance: Money.from({ amount: "80.00", currency: "BRL" }),
-          entriesCount: 2,
+          checkedEntries: 2,
         })),
       };
 

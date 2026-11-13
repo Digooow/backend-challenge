@@ -3,7 +3,11 @@ import { Wallet } from "../../../domain/entities/wallet";
 import { WalletLedgerEntry } from "../../../domain/entities/wallet-ledger-entry";
 import { Money } from "../../../domain/value-objects/money";
 import { DomainException } from "../../../domain/exceptions/domain.exception";
-import { WalletRepositoryPort, LedgerSummaryResult } from "../../../application/ports/wallet.repository";
+import {
+  WalletRepositoryPort,
+  LedgerSummaryResult,
+  encodeLedgerCursor,
+} from "../../../application/ports/wallet.repository";
 import { WalletSchema, WalletEntity } from "../entities/wallet.schema";
 import {
   WalletLedgerEntrySchema,
@@ -14,8 +18,7 @@ export class MikroOrmWalletRepository implements WalletRepositoryPort {
   constructor(private readonly globalEm: EntityManager) {}
 
   public static encodeLedgerCursor(entry: { createdAt: Date; id: string }): string {
-    const raw = JSON.stringify({ t: entry.createdAt.toISOString(), id: entry.id });
-    return Buffer.from(raw, "utf-8").toString("base64url");
+    return encodeLedgerCursor(entry);
   }
 
   public static decodeLedgerCursor(cursor: string): { createdAt: Date; id?: string } {
@@ -23,7 +26,7 @@ export class MikroOrmWalletRepository implements WalletRepositoryPort {
       const decoded = Buffer.from(cursor, "base64url").toString("utf-8");
       if (decoded.startsWith("{")) {
         const parsed = JSON.parse(decoded);
-        const date = new Date(parsed.t);
+        const date = new Date(parsed.createdAt ?? parsed.t);
         if (isNaN(date.getTime()) || typeof parsed.id !== "string") {
           throw new Error("Invalid opaque cursor");
         }
@@ -227,7 +230,9 @@ export class MikroOrmWalletRepository implements WalletRepositoryPort {
 
     const entities = await em.find(WalletLedgerEntrySchema, filter, {
       orderBy: { createdAt: "ASC", id: "ASC" },
-      limit,
+      ...(limit !== undefined && Number.isFinite(limit) && limit < Number.MAX_SAFE_INTEGER
+        ? { limit }
+        : {}),
     });
 
     return entities.map((entity) =>

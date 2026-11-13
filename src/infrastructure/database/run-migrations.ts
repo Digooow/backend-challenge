@@ -11,33 +11,39 @@ import config from "./mikro-orm.config";
  *   - `npm run migration:create -- -n <nome>` – cria nova migration via CLI.
  */
 async function run() {
-  // A configuração já inclui o `Migrator` em `extensions` (ver mikro-orm.config.ts).
   const orm = await MikroORM.init(config as any); // cast to any to avoid generic mismatch
   const action = process.argv[2] ?? "up";
+  const connection = orm.em.getConnection();
+  const migrationAdvisoryLockKey = 72839104;
 
-  switch (action) {
-    case "sync": {
-      // Atualiza o schema a partir das entidades sem gerar arquivo de migração.
-      const generator = orm.schema;
-      await generator.ensureDatabase();
-      await generator.update();
-      console.log("✅ Esquema sincronizado com sucesso!");
-      break;
+  // Advisory lock no PostgreSQL evita condição de corrida caso múltiplas réplicas executem migrations no startup
+  await connection.execute(`SELECT pg_advisory_lock(${migrationAdvisoryLockKey})`);
+
+  try {
+    switch (action) {
+      case "sync": {
+        const generator = orm.schema;
+        await generator.ensureDatabase();
+        await generator.update();
+        console.log("✅ Esquema sincronizado com sucesso!");
+        break;
+      }
+      case "up":
+        await orm.migrator.up();
+        console.log("✅ Migrations aplicadas com sucesso!");
+        break;
+      case "down":
+        await orm.migrator.down();
+        console.log("✅ Rollback realizado!");
+        break;
+      default:
+        console.error(`⚠️ Ação desconhecida: ${action}`);
+        process.exit(1);
     }
-    case "up":
-      await orm.migrator.up();
-      console.log("✅ Migrations aplicadas com sucesso!");
-      break;
-    case "down":
-      await orm.migrator.down();
-      console.log("✅ Rollback realizado!");
-      break;
-    default:
-      console.error(`⚠️ Ação desconhecida: ${action}`);
-      process.exit(1);
+  } finally {
+    await connection.execute(`SELECT pg_advisory_unlock(${migrationAdvisoryLockKey})`).catch(() => {});
+    await orm.close(true);
   }
-
-  await orm.close(true);
 }
 
 run().catch(err => {
